@@ -31,9 +31,9 @@ UART_BAUD = 115200
 RPICAM_CMD = [
     "rpicam-vid",
     "-t", "0",
-    "--width", "1280",
-    "--height", "720",
-    "--framerate", "30",
+    "--width", "640",
+    "--height", "480",
+    "--framerate", "15",
     "--codec", "h264",
     "--inline",
     "--nopreview",

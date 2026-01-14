@@ -54,7 +54,10 @@ function makePc() {
 
   pc = new RTCPeerConnection({ iceServers });
 
-  // pc.addTransceiver("video", { direction: "recvonly" });  // Firefox może mieć problemy z jawny transceiver
+  // Firefox wymaga jawnego transceiver
+  if (navigator.userAgent.includes("Firefox")) {
+    pc.addTransceiver("video", { direction: "recvonly" });
+  }
 
   pc.ontrack = (ev) => {
     log("ontrack");
