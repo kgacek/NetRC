@@ -6,7 +6,7 @@ import sys
 import subprocess
 import threading
 from typing import Optional, Any, Dict
-
+import time
 import websockets
 import serial
 
@@ -303,34 +303,89 @@ def on_offer_created(promise: Gst.Promise, *_):
         ws_send({"type": "sdp", "sdp": {"type": "offer", "sdp": sdp_text}})
     )
 
+
+
 def create_offer():
     # create data channel
     dc = webrtc.emit("create-data-channel", "control", None)
 
-    # connect dc callbacks
+    log("[DC] created (control)")
+
+    def _send_hello(ch):
+        try:
+            ch.emit("send-string", json.dumps({
+                "t": int(time.time() * 1000),
+                "hello": "from rpi",
+            }))
+            log("[DC] sent hello to browser")
+        except Exception as e:
+            log("[DC] send-string failed:", e)
+
+    def _handle_json(msg_text: str):
+        data = json.loads(msg_text)
+
+        # JS: { throttle, steering } (+ flags)
+        thr = float(data.get("throttle", 0.0))
+        st  = float(data.get("steering", data.get("steer", 0.0)))  # kompatybilność
+        flags = int(data.get("flags", 0))
+
+        # clamp -1..1
+        thr = max(-1.0, min(1.0, thr))
+        st  = max(-1.0, min(1.0, st))
+
+        # mapowanie do protokołu UART:
+        # throttle (ESP): 0..1000
+        # steer: -1000..1000
+        throttle = int((thr + 1.0) * 0.5 * 1000)   # -1..1 -> 0..1000
+        throttle = max(0, min(1000, throttle))
+
+        steer = int(st * 1000)                     # -1..1 -> -1000..1000
+        steer = max(-1000, min(1000, steer))
+
+        uart_send(throttle, steer, flags)
+        log(f"[DC] uart_send thr={throttle} steer={steer} flags={flags}")
+
     def _on_open(ch):
         log("[DC] open")
+        _send_hello(ch)
 
-    def _on_msg(ch, msg: str):
+    def _on_close(ch):
+        log("[DC] close")
+
+    def _on_error(ch, err):
+        log("[DC] error:", err)
+
+    def _on_msg_string(ch, msg: str):
         try:
-            data = json.loads(msg)
-            thr = float(data.get("throttle", 0.0))
-            st = float(data.get("steer", 0.0))
-            flags = int(data.get("flags", 0))
-
-            throttle = max(-1000, min(1000, int(thr * 1000)))
-            steer = max(-1000, min(1000, int(st * 1000)))
-
-            uart_send(throttle, steer, flags)
+            log("[DC] got string:", msg)
+            _handle_json(msg)
         except Exception as e:
-            log("[DC] parse error:", e)
+            log("[DC] parse error (string):", e)
+
+    def _on_msg_data(ch, buf):
+        try:
+            # GLib.Bytes albo bytes/bytearray
+            if hasattr(buf, "get_data"):
+                raw = buf.get_data()
+            else:
+                raw = bytes(buf)
+
+            msg = raw.decode("utf-8", errors="replace")
+            log("[DC] got data (utf8):", msg)
+            _handle_json(msg)
+        except Exception as e:
+            log("[DC] parse error (data):", e)
 
     dc.connect("on-open", _on_open)
-    dc.connect("on-message-string", _on_msg)
+    dc.connect("on-close", _on_close)
+    dc.connect("on-error", _on_error)
+    dc.connect("on-message-string", _on_msg_string)
+    dc.connect("on-message-data", _on_msg_data)
 
     # create offer
     promise = Gst.Promise.new_with_change_func(on_offer_created, None, None)
     webrtc.emit("create-offer", None, promise)
+
 
 def on_answer_created(promise: Gst.Promise, *_):
     if webrtc is None:
