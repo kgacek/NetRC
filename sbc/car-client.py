@@ -124,7 +124,7 @@ def make_pipeline(rfd: int) -> tuple[Gst.Pipeline, Any]:
         f"queue ! wb. "
         f"webrtcbin name=wb bundle-policy=max-bundle "
         f"stun-server=stun://stun.l.google.com:19302 "
-        f"turn-server=turn://pocuser:pocpass@79-76-127-159.nip.io:3478?transport=udp "
+        f"turn-server=turn://webrtc:webrtc@turn.anyfirewall.com:443?transport=tcp "
     )
 
     p = Gst.parse_launch(desc)
