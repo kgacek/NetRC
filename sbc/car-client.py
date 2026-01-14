@@ -119,19 +119,14 @@ def make_pipeline(rfd: int) -> tuple[Gst.Pipeline, Any]:
     #
     desc = (
         f"fdsrc fd={rfd} ! queue ! h264parse ! "
-        f"rtph264pay pt=96 config-interval=1 ! "
-        f"application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000 ! "
-        f"queue ! wb. "
-        f"webrtcbin name=wb bundle-policy=max-bundle "
-        f"stun-server=stun://stun.l.google.com:19302 "
-        f"turn-server=turn://pocuser:pocpass@79-76-127-159.nip.io:3478?transport=udp "
+        f"filesink location=test_gst.h264"
     )
 
     p = Gst.parse_launch(desc)
     wb = p.get_by_name("wb")
     # wb.emit("add-transceiver", GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY, Gst.Caps.from_string("application/x-rtp,media=video,encoding-name=H264,payload=96"))
-    if not wb:
-        raise RuntimeError("Cannot find webrtcbin element 'wb'")
+    # if not wb:
+    #     raise RuntimeError("Cannot find webrtcbin element 'wb'")
 
     return p, wb
 
@@ -339,7 +334,7 @@ async def ws_loop():
     # webrtc.connect("on-data-channel", on_data_channel)  # dc created by us
 
     # add transceiver for sending video
-    webrtc.emit("add-transceiver", GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY, Gst.Caps.from_string("application/x-rtp,media=video,encoding-name=H264,payload=96"))
+    # webrtc.emit("add-transceiver", GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY, Gst.Caps.from_string("application/x-rtp,media=video,encoding-name=H264,payload=96"))
     #webrtc.emit("add-transceiver", GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY, None)
     # start pipeline
     pipe.set_state(Gst.State.PLAYING)
