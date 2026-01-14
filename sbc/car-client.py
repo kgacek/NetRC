@@ -186,7 +186,7 @@ def on_data_channel(wb, channel):
 
             steer = int(st * 1000)                    # -1..1 -> -1000..1000
             steer = max(-1000, min(1000, steer))
-
+            log("[DC] parse steer:", steer)
             uart_send(throttle, steer, flags)
         except Exception as e:
             log("[DC] parse error:", e)
