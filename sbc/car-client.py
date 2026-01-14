@@ -129,8 +129,7 @@ def make_pipeline(rfd: int) -> tuple[Gst.Pipeline, Any]:
 
     p = Gst.parse_launch(desc)
     wb = p.get_by_name("wb")
-    #wb.emit("add-transceiver", GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY, None)
-    wb.emit("add-transceiver", GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY, Gst.Caps.from_string("application/x-rtp,media=video,encoding-name=H264,payload=96"))
+    # wb.emit("add-transceiver", GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY, Gst.Caps.from_string("application/x-rtp,media=video,encoding-name=H264,payload=96"))
     if not wb:
         raise RuntimeError("Cannot find webrtcbin element 'wb'")
 
@@ -308,8 +307,7 @@ async def ws_loop():
 
                 if sdp_type == "offer":
                     log("[WS] got OFFER")
-                    # (opcjonalnie) log pierwszych znaków
-                    log("[OFFER] first 200 chars:", sdp_text[:200].replace("\n", "\\n"))
+                    log("Full SDP:", sdp_text)
                     set_remote_description_then_answer("offer", sdp_text)
 
             elif msg.get("type") == "ice":
