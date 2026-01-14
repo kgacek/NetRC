@@ -118,15 +118,20 @@ def make_pipeline(rfd: int) -> tuple[Gst.Pipeline, Any]:
     # Uwaga: "wb." prosi webrtcbin o dynamiczny sink pad (to jest OK)
     #
     desc = (
-        f"fdsrc fd={rfd} ! "
-        f"filesink location=test_gst.h264"
+        f"fdsrc fd={rfd} ! queue ! h264parse ! "
+        f"rtph264pay pt=96 config-interval=1 ! "
+        f"application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000 ! "
+        f"queue ! wb. "
+        f"webrtcbin name=wb bundle-policy=max-bundle "
+        f"stun-server=stun://stun.l.google.com:19302 "
+        f"turn-server=turn://pocuser:pocpass@79-76-127-159.nip.io:3478?transport=udp "
     )
 
     p = Gst.parse_launch(desc)
     wb = p.get_by_name("wb")
     # wb.emit("add-transceiver", GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY, Gst.Caps.from_string("application/x-rtp,media=video,encoding-name=H264,payload=96"))
-    # if not wb:
-    #     raise RuntimeError("Cannot find webrtcbin element 'wb'")
+    if not wb:
+        raise RuntimeError("Cannot find webrtcbin element 'wb'")
 
     return p, wb
 
@@ -330,8 +335,7 @@ async def ws_loop():
     bus.connect("message", on_bus_message)
 
     # callbacks
-    if webrtc:
-        webrtc.connect("on-ice-candidate", on_ice_candidate)
+    webrtc.connect("on-ice-candidate", on_ice_candidate)
     # webrtc.connect("on-data-channel", on_data_channel)  # dc created by us
 
     # add transceiver for sending video
@@ -346,8 +350,7 @@ async def ws_loop():
         await ws_send({"type": "join", "roomId": ROOM_ID, "role": "car"})
         log("[WS] joined", ROOM_ID)
 
-        if webrtc:
-            create_offer()
+        create_offer()
 
         async for message in ws:
             msg = json.loads(message)
@@ -359,12 +362,10 @@ async def ws_loop():
 
                 if sdp_type == "answer":
                     log("[WS] got ANSWER")
-                    if webrtc:
-                        set_remote_description("answer", sdp_text)
+                    set_remote_description("answer", sdp_text)
 
             elif msg.get("type") == "ice":
-                if webrtc:
-                    add_ice_candidate_from_msg(msg)
+                add_ice_candidate_from_msg(msg)
 
             if stopping:
                 break
