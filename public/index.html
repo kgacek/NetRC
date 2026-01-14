@@ -132,6 +132,8 @@ let steering = 0;   // -1..1 (A/D)
 function sendControl() {
   if (!dc || dc.readyState !== "open") return;
   dc.send(JSON.stringify({ t: Date.now(), throttle, steering }));
+  log("throttle:", throttle.toFixed(2), "steering:", steering.toFixed(2));
+
 }
 
 // proste sterowanie klawiszami
