@@ -119,7 +119,9 @@ document.getElementById("connect").onclick = async () => {
       try {
         await pc.addIceCandidate(msg.candidate);
       } catch (e) {
-        log("addIceCandidate error:", e);
+        if (!e.message.includes("Error processing ICE candidate")) {
+          log("addIceCandidate error:", e);
+        }
       }
     }
   };
