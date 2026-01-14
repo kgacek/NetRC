@@ -33,7 +33,7 @@ RPICAM_CMD = [
     "-t", "0",
     "--width", "640",
     "--height", "480",
-    "--framerate", "15",
+    "--framerate", "10",
     "--codec", "h264",
     "--inline",
     "--nopreview",
