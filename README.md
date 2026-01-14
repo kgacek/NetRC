@@ -19,18 +19,7 @@ The project serves as a **foundation for further development**, such as RC vehic
 
 ## 🧠 System Architecture
 
-[ Phone / Web UI ]
-|
-v
-[ Server (API / WebSocket) ]
-|
-v
-[ SBC (Raspberry Pi / Radxa) ]
-|
-UART
-|
-v
-[ ESP32 ] ---> [ Servo ]
+[ Phone / Web UI ] <-> [ Server (API / WebSocket) ]<->[ SBC (Raspberry Pi / Radxa) ] <-UART-> [ ESP32 ] ---> [ Servo/throttle ]
 
 
 ### 🔹 Component Responsibilities
@@ -61,27 +50,15 @@ v
 
 ## 📂 Directory & File Overview
 
-### 🔹 `/server`
-Server-side application acting as a communication bridge.
-
-- **app.py**  
-  Main server application handling connections from clients and SBCs.
-- **requirements.txt**  
-  Python dependencies required to run the server.
-- **README.md**  
-  Detailed server setup and configuration instructions.
-
----
 
 ### 🔹 `/sbc`
 Software running on Raspberry Pi or Radxa SBC.
 
-- **uart_client.py**  
-  Handles UART communication with the ESP32.
-- **camera_stream.py**  
-  Captures and streams video from the connected camera.
-- **config.py**  
-  Configuration file (ports, IP addresses, UART parameters).
+- **car-client.py**  
+ receives commands from the server  
+ sends control data to ESP32 via UART  
+ streams video from the camera
+
 
 ---
 
@@ -90,22 +67,14 @@ ESP32 firmware.
 
 - **main.ino**  
   Main ESP32 program receiving commands and controlling the servo.
-- **servo_control.h**  
-  Servo control logic using PWM.
 
 ---
 
-### 🔹 `/webui`
+### 🔹 `webui`
 Web-based user interface.
 
-- **index.html** – UI structure
-- **script.js** – control logic (buttons, joystick, communication)
-- **style.css** – UI styling
-
----
-
-### 🔹 `/diagrams`
-- **architecture.png** – system architecture diagram
+- **public/index.html** – UI structure
+- **server.js** – control logic (buttons, joystick, communication)
 
 ---
 
