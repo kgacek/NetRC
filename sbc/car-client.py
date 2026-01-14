@@ -350,6 +350,9 @@ async def ws_loop():
         await ws_send({"type": "join", "roomId": ROOM_ID, "role": "car"})
         log("[WS] joined", ROOM_ID)
 
+        # add transceiver for sending video
+        webrtc.emit("add-transceiver", GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY, Gst.Caps.from_string("application/x-rtp,media=video,encoding-name=H264,payload=96"))
+
         create_offer()
 
         async for message in ws:
