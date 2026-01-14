@@ -129,7 +129,7 @@ def make_pipeline(rfd: int) -> tuple[Gst.Pipeline, Any]:
 
     p = Gst.parse_launch(desc)
     wb = p.get_by_name("wb")
-
+    wb.emit("add-transceiver", GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY, None)
     if not wb:
         raise RuntimeError("Cannot find webrtcbin element 'wb'")
 
