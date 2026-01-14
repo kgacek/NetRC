@@ -36,7 +36,7 @@ const videoEl = document.getElementById("v");
 function log(...a){ logEl.textContent += a.join(" ") + "\n"; }
 
 let ws, pc, dc;
-let throttle = 0; // -1..1
+
 
 function makePc() {
   const iceServers = [
@@ -126,20 +126,33 @@ document.getElementById("connect").onclick = async () => {
   ws.onerror = (e) => log("WS error", e);
 };
 
+let throttle = 0;   // -1..1 (W/S)
+let steering = 0;   // -1..1 (A/D)
+
 function sendControl() {
   if (!dc || dc.readyState !== "open") return;
-  dc.send(JSON.stringify({ t: Date.now(), throttle }));
+  dc.send(JSON.stringify({ t: Date.now(), throttle, steering }));
 }
 
 // proste sterowanie klawiszami
 window.addEventListener("keydown", (e) => {
   if (e.repeat) return;
+
+  // throttle
   if (e.code === "KeyW") throttle = Math.min(1, throttle + 0.1);
   if (e.code === "KeyS") throttle = Math.max(-1, throttle - 0.1);
-  if (e.code === "Space") throttle = 0;
+
+  // steering
+  if (e.code === "KeyA") steering = Math.max(-1, steering - 0.1);
+  if (e.code === "KeyD") steering = Math.min(1, steering + 0.1);
+
+  // reset
+  if (e.code === "Space") { throttle = 0; steering = 0; }
+
   sendControl();
-  log("throttle:", throttle.toFixed(2));
+  log("throttle:", throttle.toFixed(2), "steering:", steering.toFixed(2));
 });
+
 </script>
 </body>
 </html>

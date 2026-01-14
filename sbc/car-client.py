@@ -168,12 +168,24 @@ def on_data_channel(wb, channel):
     def _on_msg(ch, msg: str):
         try:
             data = json.loads(msg)
+
+            # JS wysyła: { t, throttle, steering } (+ opcjonalnie flags)
             thr = float(data.get("throttle", 0.0))
-            st = float(data.get("steer", 0.0))
+            st  = float(data.get("steering", data.get("steer", 0.0)))  # kompatybilność wstecz
             flags = int(data.get("flags", 0))
 
-            throttle = max(-1000, min(1000, int(thr * 1000)))
-            steer = max(-1000, min(1000, int(st * 1000)))
+            # clamp -1..1
+            thr = max(-1.0, min(1.0, thr))
+            st  = max(-1.0, min(1.0, st))
+
+            # mapowanie do protokołu UART:
+            # throttle: w ESP oczekuje 0..1000
+            # steering: -1000..1000
+            throttle = int((thr + 1.0) * 0.5 * 1000)   # -1..1 -> 0..1000
+            throttle = max(0, min(1000, throttle))
+
+            steer = int(st * 1000)                    # -1..1 -> -1000..1000
+            steer = max(-1000, min(1000, steer))
 
             uart_send(throttle, steer, flags)
         except Exception as e:
@@ -181,6 +193,7 @@ def on_data_channel(wb, channel):
 
     channel.connect("on-open", _on_open)
     channel.connect("on-message-string", _on_msg)
+
 
 def add_ice_candidate_from_msg(msg: Dict[str, Any]):
     # Przyjmujemy oba formaty (na wszelki wypadek):
