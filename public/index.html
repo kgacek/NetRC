@@ -40,16 +40,8 @@ let throttle = 0; // -1..1
 
 function makePc() {
   const iceServers = [
-    { urls: "stun:stun.l.google.com:19302" },
-    {
-      urls: [
-        "turn:79-76-127-159.nip.io:3478?transport=udp",
-        "turn:79-76-127-159.nip.io:3478?transport=tcp",
-        "turns:79-76-127-159.nip.io:5349?transport=tcp"
-      ],
-      username: "pocuser",
-      credential: "pocpass"
-    }
+    { urls: "stun:stun.l.google.com:19302" }
+    // TURN może powodować problemy w Firefox
   ];
 
   pc = new RTCPeerConnection({ iceServers });
