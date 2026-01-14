@@ -62,10 +62,11 @@ wss.on("connection", (ws) => {
     // route tylko do drugiej roli
     const target = ws.role === "car" ? room.ui : room.car;
     if (target && target.readyState === WebSocket.OPEN) {
+      console.log(`[WS] route ${data.type} from ${ws.role} to ${ws.role === "car" ? "ui" : "car"}`);
       target.send(JSON.stringify(data));
     } else {
       // pomocne w debug
-      // console.log(`[WS] drop type=${data.type} room=${ws.roomId} no target`);
+      console.log(`[WS] drop ${data.type} from ${ws.role} no target`);
     }
   });
 
