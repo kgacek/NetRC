@@ -191,11 +191,9 @@ def on_data_channel(wb, channel):
         steer = max(-1000, min(1000, steer))
 
         uart_send(throttle, steer, flags)
-        log("[DC] uart_send thr=%d steer=%d flags=%d" % (throttle, steer, flags))
-
+    
     def _on_msg_string(ch, msg: str):
         try:
-            log("[DC] got string:", msg)
             _handle_json(msg)
         except Exception as e:
             log("[DC] parse error (string):", e)
@@ -343,7 +341,7 @@ def create_offer():
         steer = max(-1000, min(1000, steer))
 
         uart_send(throttle, steer, flags)
-        log(f"[DC] uart_send thr={throttle} steer={steer} flags={flags}")
+        
 
     def _on_open(ch):
         log("[DC] open")
@@ -357,7 +355,6 @@ def create_offer():
 
     def _on_msg_string(ch, msg: str):
         try:
-            log("[DC] got string:", msg)
             _handle_json(msg)
         except Exception as e:
             log("[DC] parse error (string):", e)
