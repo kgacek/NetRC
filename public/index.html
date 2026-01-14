@@ -129,31 +129,82 @@ document.getElementById("connect").onclick = async () => {
 let throttle = 0;   // -1..1 (W/S)
 let steering = 0;   // -1..1 (A/D)
 
+let throttle = 0;   // -1..1
+let steering = 0;   // -1..1
+
+const keys = { w:false, a:false, s:false, d:false };
+
+// parametry "feelingu"
+const SEND_HZ = 50;
+const DT = 1 / SEND_HZ;
+
+// jak szybko narasta przy trzymaniu (na sekundę)
+const THROTTLE_RATE = 1.6; // 0..1 w ~0.6s
+const STEER_RATE    = 2.8; // skręt szybciej
+
+// jak szybko wraca do zera po puszczeniu (na sekundę)
+const THROTTLE_RETURN = 2.2;
+const STEER_RETURN    = 4.0;
+
+function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
+
+function approachZero(v, amount) {
+  if (v > 0) return Math.max(0, v - amount);
+  if (v < 0) return Math.min(0, v + amount);
+  return 0;
+}
+
 function sendControl() {
   if (!dc || dc.readyState !== "open") return;
   dc.send(JSON.stringify({ t: Date.now(), throttle, steering }));
-  log("throttle:", throttle.toFixed(2), "steering:", steering.toFixed(2));
-
 }
 
-// proste sterowanie klawiszami
-window.addEventListener("keydown", (e) => {
-  if (e.repeat) return;
-
+// tick sterowania (płynne)
+setInterval(() => {
   // throttle
-  if (e.code === "KeyW") throttle = Math.min(1, throttle + 0.1);
-  if (e.code === "KeyS") throttle = Math.max(-1, throttle - 0.1);
+  if (keys.w) throttle += THROTTLE_RATE * DT;
+  if (keys.s) throttle -= THROTTLE_RATE * DT;
+  if (!keys.w && !keys.s) throttle = approachZero(throttle, THROTTLE_RETURN * DT);
 
   // steering
-  if (e.code === "KeyA") steering = Math.max(-1, steering - 0.1);
-  if (e.code === "KeyD") steering = Math.min(1, steering + 0.1);
+  if (keys.d) steering += STEER_RATE * DT;
+  if (keys.a) steering -= STEER_RATE * DT;
+  if (!keys.a && !keys.d) steering = approachZero(steering, STEER_RETURN * DT);
 
-  // reset
-  if (e.code === "Space") { throttle = 0; steering = 0; }
+  throttle = clamp(throttle, -1, 1);
+  steering = clamp(steering, -1, 1);
 
   sendControl();
-  log("throttle:", throttle.toFixed(2), "steering:", steering.toFixed(2));
+}, 1000 / SEND_HZ);
+
+// key handling
+window.addEventListener("keydown", (e) => {
+  if (e.code === "KeyW") keys.w = true;
+  if (e.code === "KeyS") keys.s = true;
+  if (e.code === "KeyA") keys.a = true;
+  if (e.code === "KeyD") keys.d = true;
+
+  if (e.code === "Space") {
+    throttle = 0;
+    steering = 0;
+    keys.w = keys.a = keys.s = keys.d = false;
+    sendControl();
+    log("STOP throttle:", throttle.toFixed(2), "steering:", steering.toFixed(2));
+  }
 });
+
+window.addEventListener("keyup", (e) => {
+  if (e.code === "KeyW") keys.w = false;
+  if (e.code === "KeyS") keys.s = false;
+  if (e.code === "KeyA") keys.a = false;
+  if (e.code === "KeyD") keys.d = false;
+});
+
+// opcjonalnie: log co 200ms, żeby nie spamować
+setInterval(() => {
+  log("throttle:", throttle.toFixed(2), "steering:", steering.toFixed(2));
+}, 1000);
+
 
 </script>
 </body>
