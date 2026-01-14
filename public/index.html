@@ -62,6 +62,12 @@ function makePc() {
     videoEl.srcObject = ev.streams[0];
   };
 
+  pc.ondatachannel = (ev) => {
+    dc = ev.channel;
+    dc.onopen = () => log("DataChannel open");
+    dc.onmessage = (e) => log("DC msg:", e.data);
+  };
+
   pc.onicecandidate = (ev) => {
     if (ev.candidate) {
       ws.send(JSON.stringify({ type: "ice", candidate: ev.candidate }));
@@ -73,13 +79,14 @@ function makePc() {
 }
 
 async function startAsViewer() {
-  // Browser zawsze tworzy DataChannel i OFFER
-  dc = pc.createDataChannel("control");
-  dc.onopen = () => log("DataChannel open");
-  dc.onmessage = (e) => log("DC msg:", e.data);
+  // Czekamy na offer od car
+}
 
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
+async function handleOffer(sdp) {
+  await pc.setRemoteDescription(sdp);
+  // create answer
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
   ws.send(JSON.stringify({ type: "sdp", sdp: pc.localDescription }));
 }
 
@@ -100,15 +107,10 @@ document.getElementById("connect").onclick = async () => {
     const msg = JSON.parse(ev.data);
 
     if (msg.type === "sdp") {
-      log("Got SDP", msg.sdp.type);
-
-      // W tym flow spodziewamy się TYLKO answer z RPi
-      if (msg.sdp.type !== "answer") {
-        log("Ignoring remote SDP type:", msg.sdp.type);
-        return;
+      if (msg.sdp.type === "offer") {
+        log("Got SDP offer");
+        await handleOffer(msg.sdp);
       }
-
-      await pc.setRemoteDescription(msg.sdp);
     }
 
     if (msg.type === "ice" && msg.candidate) {
