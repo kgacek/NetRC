@@ -288,6 +288,9 @@ async def ws_loop():
     webrtc.connect("on-ice-candidate", on_ice_candidate)
     webrtc.connect("on-data-channel", on_data_channel)
 
+    # add transceiver for sending video
+    webrtc.emit("add-transceiver", GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY, Gst.Caps.from_string("application/x-rtp,media=video,encoding-name=H264,payload=96"))
+
     # start pipeline
     pipe.set_state(Gst.State.PLAYING)
     log("[GST] pipeline PLAYING")
