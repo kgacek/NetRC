@@ -320,7 +320,7 @@ async def ws_loop():
     t.start()
 
     cam_fd = start_rpicam()
-    log("[CAM] rpicam-vid started")
+    log("[CAM] rpicam-vid started, fd:", cam_fd)
 
     pipe, webrtc = make_pipeline(cam_fd)
 
