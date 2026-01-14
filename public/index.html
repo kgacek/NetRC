@@ -1,0 +1,143 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>RC WebRTC PoC</title>
+  <style>
+    body { font-family: sans-serif; margin: 16px; }
+    video { width: 100%; max-width: 900px; background: #111; }
+    .row { margin: 8px 0; }
+    input { padding: 6px; }
+    button { padding: 8px 12px; }
+    pre { background:#f5f5f5; padding:10px; overflow:auto; }
+  </style>
+</head>
+<body>
+  <h2>RC WebRTC PoC</h2>
+
+  <div class="row">
+    Room: <input id="room" value="test1"/>
+    Signaling URL: <input id="wsurl" style="width:380px" value="wss://79-76-127-159.nip.io/"/>
+    <button id="connect">Connect</button>
+  </div>
+
+  <video id="v" autoplay playsinline controls muted></video>
+
+  <div class="row">
+    Sterowanie: <b>W/S</b> gaz +/-, <b>Space</b> stop.
+  </div>
+
+  <pre id="log"></pre>
+
+<script>
+const logEl = document.getElementById("log");
+const videoEl = document.getElementById("v");
+function log(...a){ logEl.textContent += a.join(" ") + "\n"; }
+
+let ws, pc, dc;
+let throttle = 0; // -1..1
+
+function makePc() {
+  const iceServers = [
+    { urls: "stun:stun.l.google.com:19302" },
+    {
+      urls: [
+        "turn:79-76-127-159.nip.io:3478?transport=udp",
+        "turn:79-76-127-159.nip.io:3478?transport=tcp",
+        "turns:79-76-127-159.nip.io:5349?transport=tcp"
+      ],
+      username: "pocuser",
+      credential: "pocpass"
+    }
+  ];
+
+  pc = new RTCPeerConnection({ iceServers });
+
+  // Firefox lubi jawny transceiver recvonly
+  pc.addTransceiver("video", { direction: "recvonly" });
+
+  pc.ontrack = (ev) => {
+    log("ontrack");
+    videoEl.srcObject = ev.streams[0];
+  };
+
+  pc.onicecandidate = (ev) => {
+    if (ev.candidate) {
+      ws.send(JSON.stringify({ type: "ice", candidate: ev.candidate }));
+    }
+  };
+
+  pc.onconnectionstatechange = () => log("pc connectionState:", pc.connectionState);
+  pc.oniceconnectionstatechange = () => log("pc iceConnectionState:", pc.iceConnectionState);
+}
+
+async function startAsViewer() {
+  // Browser zawsze tworzy DataChannel i OFFER
+  dc = pc.createDataChannel("control");
+  dc.onopen = () => log("DataChannel open");
+  dc.onmessage = (e) => log("DC msg:", e.data);
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  ws.send(JSON.stringify({ type: "sdp", sdp: pc.localDescription }));
+}
+
+document.getElementById("connect").onclick = async () => {
+  const roomId = document.getElementById("room").value.trim();
+  const wsurl = document.getElementById("wsurl").value.trim();
+
+  ws = new WebSocket(wsurl);
+
+  ws.onopen = async () => {
+    log("WS open");
+    ws.send(JSON.stringify({ type: "join", roomId, role: "ui" }));
+    makePc();
+    await startAsViewer();
+  };
+
+  ws.onmessage = async (ev) => {
+    const msg = JSON.parse(ev.data);
+
+    if (msg.type === "sdp") {
+      log("Got SDP", msg.sdp.type);
+
+      // W tym flow spodziewamy się TYLKO answer z RPi
+      if (msg.sdp.type !== "answer") {
+        log("Ignoring remote SDP type:", msg.sdp.type);
+        return;
+      }
+
+      await pc.setRemoteDescription(msg.sdp);
+    }
+
+    if (msg.type === "ice" && msg.candidate) {
+      try {
+        await pc.addIceCandidate(msg.candidate);
+      } catch (e) {
+        log("addIceCandidate error:", e);
+      }
+    }
+  };
+
+  ws.onclose = () => log("WS closed");
+  ws.onerror = (e) => log("WS error", e);
+};
+
+function sendControl() {
+  if (!dc || dc.readyState !== "open") return;
+  dc.send(JSON.stringify({ t: Date.now(), throttle }));
+}
+
+// proste sterowanie klawiszami
+window.addEventListener("keydown", (e) => {
+  if (e.repeat) return;
+  if (e.code === "KeyW") throttle = Math.min(1, throttle + 0.1);
+  if (e.code === "KeyS") throttle = Math.max(-1, throttle - 0.1);
+  if (e.code === "Space") throttle = 0;
+  sendControl();
+  log("throttle:", throttle.toFixed(2));
+});
+</script>
+</body>
+</html>
