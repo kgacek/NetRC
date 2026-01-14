@@ -129,7 +129,8 @@ def make_pipeline(rfd: int) -> tuple[Gst.Pipeline, Any]:
 
     p = Gst.parse_launch(desc)
     wb = p.get_by_name("wb")
-    wb.emit("add-transceiver", GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY, None)
+    #wb.emit("add-transceiver", GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY, None)
+    wb.emit("add-transceiver", GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY, Gst.Caps.from_string("application/x-rtp,media=video,encoding-name=H264,payload=96"))
     if not wb:
         raise RuntimeError("Cannot find webrtcbin element 'wb'")
 
@@ -221,6 +222,10 @@ def on_set_remote_done(promise: Gst.Promise, *_):
         return
 
     promise.wait()
+    reply = promise.get_reply()
+    if reply is None:
+        log("[SDP] set-remote-description failed: reply is None")
+        return
     log("[SDP] remote description set, creating answer...")
 
     prom = Gst.Promise.new_with_change_func(on_answer_created, None, None)
@@ -232,7 +237,13 @@ def on_answer_created(promise: Gst.Promise, *_):
 
     promise.wait()
     reply = promise.get_reply()
+    if reply is None:
+        log("[SDP] create-answer failed: reply is None")
+        return
     answer = reply.get_value("answer")
+    if answer is None:
+        log("[SDP] create-answer failed: answer is None")
+        return
 
     # ustaw local
     webrtc.emit("set-local-description", answer, Gst.Promise.new())
