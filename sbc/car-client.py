@@ -136,7 +136,7 @@ def make_pipeline(rfd: int) -> tuple[Gst.Pipeline, Any]:
         f"application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000 ! "
         f"queue ! wb. "
         f"webrtcbin name=wb bundle-policy=max-bundle "
-        f"turn-server=\"turn://{turn_usr}:{turn_pass}@{turn_host}:3478?transport=udp\" "
+        f"turn-server=\"turn://{turn_usr}:{turn_pass}@{turn_host}:3478?transport=tcp\" "
     )
 
     try:
