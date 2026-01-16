@@ -512,16 +512,16 @@ async def ws_loop():
     webrtc.connect("on-ice-candidate", on_ice_candidate)
     
     # Monitor ICE gathering state
-    def on_notify_ice_gathering_state(pspec, user_data):
+    def on_notify_ice_gathering_state(obj, pspec):
         state = webrtc.get_property("ice-gathering-state")
         log(f"[ICE] Gathering state: {state}")
     
-    def on_notify_ice_connection_state(pspec, user_data):
+    def on_notify_ice_connection_state(obj, pspec):
         state = webrtc.get_property("ice-connection-state")
         log(f"[ICE] Connection state: {state}")
     
-    webrtc.connect("notify::ice-gathering-state", on_notify_ice_gathering_state, None)
-    webrtc.connect("notify::ice-connection-state", on_notify_ice_connection_state, None)
+    webrtc.connect("notify::ice-gathering-state", on_notify_ice_gathering_state)
+    webrtc.connect("notify::ice-connection-state", on_notify_ice_connection_state)
     # webrtc.connect("on-data-channel", on_data_channel)  # dc created by us
     # start pipeline
     pipe.set_state(Gst.State.PLAYING)
