@@ -58,8 +58,8 @@ function makePc() {
   ];
 
   pc = new RTCPeerConnection({ 
-    iceServers: iceServers
-    // iceTransportPolicy: "relay"  // Temporarily disabled for testing
+    iceServers: iceServers,
+    iceTransportPolicy: "relay"
   });
   
   pc.remoteDescriptionPending = false;
@@ -83,7 +83,11 @@ function makePc() {
 
   pc.onicecandidate = (ev) => {
     if (ev.candidate) {
-      log("Local ICE candidate:", ev.candidate.candidate.substring(0, 60) + "...");
+      const c = ev.candidate;
+      const type = c.type || "unknown";
+      const protocol = c.protocol || "?";
+      const address = c.address || c.candidate.split(" ")[4] || "?";
+      log(`Local ICE [${type}/${protocol}]: ${address} - ${c.candidate.substring(0, 80)}...`);
       ws.send(JSON.stringify({ type: "ice", candidate: ev.candidate }));
     } else {
       log("ICE gathering complete");
@@ -242,7 +246,7 @@ window.addEventListener("keyup", (e) => {
 // opcjonalnie: log co 200ms, żeby nie spamować
 setInterval(() => {
   log("throttle:", throttle.toFixed(2), "steering:", steering.toFixed(2));
-}, 1000);
+}, 10000);
 
 
 </script>
