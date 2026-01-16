@@ -51,7 +51,10 @@ function makePc() {
     }
   ];
 
-  pc = new RTCPeerConnection({ iceServers });
+  pc = new RTCPeerConnection({ 
+    iceServers,
+    iceTransportPolicy: "relay"
+  });
 
   // Firefox wymaga jawnego transceiver
   if (navigator.userAgent.includes("Firefox")) {
