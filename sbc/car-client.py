@@ -595,6 +595,10 @@ def shutdown(*_):
     sys.exit(0)
 
 if __name__ == "__main__":
+    # Enable GStreamer debug for webrtc and nice (ICE library)
+    import os
+    os.environ["GST_DEBUG"] = "webrtcbin:5,nice:5,nicesrc:5,nicesink:5"
+    
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
     asyncio.run(ws_loop())
