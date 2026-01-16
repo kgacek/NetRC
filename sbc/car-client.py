@@ -178,6 +178,9 @@ def on_ice_candidate(wb, mlineindex, candidate):
     """Handle ICE candidate generation. Log and send to remote peer."""
     cand_str = str(candidate)
     
+    # Log full candidate first
+    log(f"[ICE] Local candidate (full): {cand_str}")
+    
     # Parse candidate type from string
     cand_type = "unknown"
     if "typ host" in cand_str:
@@ -191,7 +194,7 @@ def on_ice_candidate(wb, mlineindex, candidate):
     parts = cand_str.split()
     ip_addr = parts[4] if len(parts) > 4 else "?"
     
-    log(f"[ICE] Local candidate [{cand_type}]: {ip_addr} - {cand_str[:80]}...")
+    log(f"[ICE] Type: {cand_type}, IP: {ip_addr}")
     
     # Send to remote peer via WebSocket
     _run_coro_threadsafe(
