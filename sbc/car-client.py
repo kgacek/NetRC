@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import asyncio
 import json
+import os
 import signal
 import sys
 import subprocess
@@ -26,6 +27,11 @@ ROOM_ID = "test1"
 
 UART_DEV = "/dev/serial0"
 UART_BAUD = 115200
+
+# Control ranges
+THROTTLE_MIN, THROTTLE_MAX = 0, 1000
+STEER_MIN, STEER_MAX = -1000, 1000
+CONTROL_RANGE = 1.0  # ±1.0 from browser
 
 # Kamera: H264 w stdout (ważne: --nopreview)
 RPICAM_CMD = [
@@ -61,7 +67,8 @@ stopping = False
 glib_loop: Optional[GLib.MainLoop] = None
 
 def log(*a):
-    print(*a, flush=True)
+    """Log with timestamp."""
+    print(f"[{time.strftime('%H:%M:%S')}]", *a, flush=True)
 
 async def ws_send(obj: dict) -> None:
     if ws is None:
@@ -113,23 +120,30 @@ def start_glib_mainloop():
     glib_loop.run()
 
 def make_pipeline(rfd: int) -> tuple[Gst.Pipeline, Any]:
+    """Create H264 video pipeline with WebRTC sink."""
     # Pipeline: fdsrc -> h264parse -> rtph264pay -> application/x-rtp -> webrtcbin
-    #
-    # Uwaga: "wb." prosi webrtcbin o dynamiczny sink pad (to jest OK)
-    #
+    # Note: "wb." requests dynamic sink pad from webrtcbin
+    turn_usr = os.environ.get("TURN_USER", "pocuser")
+    turn_pass = os.environ.get("TURN_PASS", "pocpass")
+    turn_srv = f"turn://{turn_usr}:{turn_pass}@79-76-127-159.nip.io:3478?transport=tcp"
+    
     desc = (
         f"fdsrc fd={rfd} ! queue ! h264parse ! "
         f"rtph264pay pt=96 config-interval=1 ! "
         f"application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000 ! "
         f"queue ! wb. "
         f"webrtcbin name=wb bundle-policy=max-bundle "
-        f"stun-server=stun://stun.l.google.com:19302 "
-        f"turn-server=turn://webrtc:webrtc@turn.anyfirewall.com:443?transport=tcp "
+        f"turn-server={turn_srv} "
     )
 
-    p = Gst.parse_launch(desc)
+    try:
+        p = Gst.parse_launch(desc)
+        if p is None:
+            raise RuntimeError("Gst.parse_launch() returned None")
+    except Exception as e:
+        raise RuntimeError(f"Pipeline creation failed: {e}") from e
+
     wb = p.get_by_name("wb")
-    # wb.emit("add-transceiver", GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY, Gst.Caps.from_string("application/x-rtp,media=video,encoding-name=H264,payload=96"))
     if not wb:
         raise RuntimeError("Cannot find webrtcbin element 'wb'")
 
@@ -161,81 +175,45 @@ def on_ice_candidate(wb, mlineindex, candidate):
         })
     )
 
-def on_data_channel(wb, channel):
-    def _on_open(ch):
-        log("[DC] open label=", ch.get_property("label") if hasattr(ch, "get_property") else "?")
-        # wyślij test do przeglądarki (sprawdza kierunek RPi -> Browser)
+def on_data_channel(wb: Any, channel: Any) -> None:
+    """Handle incoming data channel."""
+    def _on_open(ch: Any) -> None:
+        label = ch.get_property("label") if hasattr(ch, "get_property") else "unknown"
+        log(f"[DC] open label={label}")
+        _send_hello(ch)
+
+    def _on_msg_string(ch: Any, msg: str) -> None:
+        _handle_control_message(msg)
+
+    def _on_msg_data(ch: Any, buf: Any) -> None:
+        """Handle binary data from browser."""
         try:
-            ch.emit("send-string", json.dumps({"t": int(time.time()*1000), "hello": "from rpi"}))
-            log("[DC] sent hello to browser")
-        except Exception as e:
-            log("[DC] send-string failed:", e)
-
-    def _handle_json(msg_text: str):
-        data = json.loads(msg_text)
-
-        thr = float(data.get("throttle", 0.0))
-        # JS wysyła "steering", starsze mogło wysyłać "steer"
-        st  = float(data.get("steering", data.get("steer", 0.0)))
-        flags = int(data.get("flags", 0))
-
-        # clamp -1..1
-        thr = max(-1.0, min(1.0, thr))
-        st  = max(-1.0, min(1.0, st))
-
-        # ESP: throttle 0..1000, steer -1000..1000
-        throttle = int((thr + 1.0) * 0.5 * 1000)   # -1..1 -> 0..1000
-        throttle = max(0, min(1000, throttle))
-
-        steer = int(st * 1000)                     # -1..1 -> -1000..1000
-        steer = max(-1000, min(1000, steer))
-
-        uart_send(throttle, steer, flags)
-    
-    def _on_msg_string(ch, msg: str):
-        try:
-            _handle_json(msg)
-        except Exception as e:
-            log("[DC] parse error (string):", e)
-
-    def _on_msg_data(ch, buf):
-        """
-        W wielu konfiguracjach browser->gstreamer wpada jako binary.
-        buf bywa bytes/bytearray albo GLib.Bytes – próbujemy wyciągnąć bajty.
-        """
-        try:
-            if hasattr(buf, "get_data"):          # GLib.Bytes
+            if hasattr(buf, "get_data"):  # GLib.Bytes
                 raw = buf.get_data()
             else:
                 raw = bytes(buf)
-
             msg = raw.decode("utf-8", errors="replace")
-            log("[DC] got data (utf8):", msg)
-            _handle_json(msg)
+            log(f"[DC] got data (utf8): {msg}")
+            _handle_control_message(msg)
         except Exception as e:
-            log("[DC] parse error (data):", e)
+            log("[DC] data parse error:", e)
 
-    def _on_error(ch, err):
-        log("[DC] error:", err)
+    def _on_error(ch: Any, err: str) -> None:
+        log(f"[DC] error: {err}")
 
-    def _on_close(ch):
+    def _on_close(ch: Any) -> None:
         log("[DC] close")
 
     channel.connect("on-open", _on_open)
     channel.connect("on-close", _on_close)
     channel.connect("on-error", _on_error)
-
-    # Najważniejsze: podpinamy OBA typy
     channel.connect("on-message-string", _on_msg_string)
     channel.connect("on-message-data", _on_msg_data)
-
     log("[DC] handlers connected")
 
 
 def add_ice_candidate_from_msg(msg: Dict[str, Any]):
-    # Przyjmujemy oba formaty (na wszelki wypadek):
-    # 1) msg.candidate = {candidate, sdpMLineIndex, sdpMid}
-    # 2) msg.ice = {candidate, sdpMLineIndex} (stare)
+    """Add ICE candidate from message."""
     if webrtc is None:
         return
 
@@ -245,6 +223,53 @@ def add_ice_candidate_from_msg(msg: Dict[str, Any]):
 
     if cand:
         webrtc.emit("add-ice-candidate", int(mline), str(cand))
+
+
+def clamp_control(value: float, min_val: float = -CONTROL_RANGE, max_val: float = CONTROL_RANGE) -> float:
+    """Clamp control value to valid range."""
+    return max(min_val, min(max_val, value))
+
+
+def parse_control_input(data: Dict[str, Any]) -> tuple[int, int, int]:
+    """Parse and convert control input to UART format.
+    
+    Returns: (throttle: 0-1000, steer: -1000-1000, flags: int)
+    """
+    thr = clamp_control(float(data.get("throttle", 0.0)))
+    st = clamp_control(float(data.get("steering", data.get("steer", 0.0))))
+    flags = int(data.get("flags", 0))
+    
+    throttle = int((thr + 1.0) * 0.5 * THROTTLE_MAX)
+    throttle = max(THROTTLE_MIN, min(THROTTLE_MAX, throttle))
+    
+    steer = int(st * STEER_MAX)
+    steer = max(STEER_MIN, min(STEER_MAX, steer))
+    
+    return throttle, steer, flags
+
+
+def _send_hello(ch: Any) -> None:
+    """Send hello message to browser on data channel."""
+    try:
+        ch.emit("send-string", json.dumps({
+            "t": int(time.time() * 1000),
+            "hello": "from rpi"
+        }))
+        log("[DC] sent hello to browser")
+    except Exception as e:
+        log("[DC] send-string failed:", e)
+
+
+def _handle_control_message(msg_text: str) -> None:
+    """Handle control message from browser."""
+    try:
+        data = json.loads(msg_text)
+        throttle, steer, flags = parse_control_input(data)
+        uart_send(throttle, steer, flags)
+    except json.JSONDecodeError as e:
+        log("[DC] JSON parse error:", e)
+    except Exception as e:
+        log("[DC] control error:", e)
 
 def set_remote_description(sdp_type: str, sdp_text: str):
     if webrtc is None:
@@ -303,75 +328,40 @@ def on_offer_created(promise: Gst.Promise, *_):
 
 
 
-def create_offer():
-    # create data channel
+def create_offer() -> None:
+    """Create WebRTC offer with data channel."""
+    if webrtc is None:
+        log("[OFFER] webrtc is None")
+        return
+        
+    # Create data channel
     dc = webrtc.emit("create-data-channel", "control", None)
-
     log("[DC] created (control)")
 
-    def _send_hello(ch):
-        try:
-            ch.emit("send-string", json.dumps({
-                "t": int(time.time() * 1000),
-                "hello": "from rpi",
-            }))
-            log("[DC] sent hello to browser")
-        except Exception as e:
-            log("[DC] send-string failed:", e)
-
-    def _handle_json(msg_text: str):
-        data = json.loads(msg_text)
-
-        # JS: { throttle, steering } (+ flags)
-        thr = float(data.get("throttle", 0.0))
-        st  = float(data.get("steering", data.get("steer", 0.0)))  # kompatybilność
-        flags = int(data.get("flags", 0))
-
-        # clamp -1..1
-        thr = max(-1.0, min(1.0, thr))
-        st  = max(-1.0, min(1.0, st))
-
-        # mapowanie do protokołu UART:
-        # throttle (ESP): 0..1000
-        # steer: -1000..1000
-        throttle = int((thr + 1.0) * 0.5 * 1000)   # -1..1 -> 0..1000
-        throttle = max(0, min(1000, throttle))
-
-        steer = int(st * 1000)                     # -1..1 -> -1000..1000
-        steer = max(-1000, min(1000, steer))
-
-        uart_send(throttle, steer, flags)
-        
-
-    def _on_open(ch):
+    def _on_open(ch: Any) -> None:
         log("[DC] open")
         _send_hello(ch)
 
-    def _on_close(ch):
+    def _on_close(ch: Any) -> None:
         log("[DC] close")
 
-    def _on_error(ch, err):
-        log("[DC] error:", err)
+    def _on_error(ch: Any, err: str) -> None:
+        log(f"[DC] error: {err}")
 
-    def _on_msg_string(ch, msg: str):
-        try:
-            _handle_json(msg)
-        except Exception as e:
-            log("[DC] parse error (string):", e)
+    def _on_msg_string(ch: Any, msg: str) -> None:
+        _handle_control_message(msg)
 
-    def _on_msg_data(ch, buf):
+    def _on_msg_data(ch: Any, buf: Any) -> None:
         try:
-            # GLib.Bytes albo bytes/bytearray
             if hasattr(buf, "get_data"):
                 raw = buf.get_data()
             else:
                 raw = bytes(buf)
-
             msg = raw.decode("utf-8", errors="replace")
-            log("[DC] got data (utf8):", msg)
-            _handle_json(msg)
+            log(f"[DC] got data (utf8): {msg}")
+            _handle_control_message(msg)
         except Exception as e:
-            log("[DC] parse error (data):", e)
+            log("[DC] data parse error:", e)
 
     dc.connect("on-open", _on_open)
     dc.connect("on-close", _on_close)
@@ -379,7 +369,7 @@ def create_offer():
     dc.connect("on-message-string", _on_msg_string)
     dc.connect("on-message-data", _on_msg_data)
 
-    # create offer
+    # Create offer
     promise = Gst.Promise.new_with_change_func(on_offer_created, None, None)
     webrtc.emit("create-offer", None, promise)
 
@@ -441,10 +431,6 @@ async def ws_loop():
     # callbacks
     webrtc.connect("on-ice-candidate", on_ice_candidate)
     # webrtc.connect("on-data-channel", on_data_channel)  # dc created by us
-
-    # add transceiver for sending video
-    # webrtc.emit("add-transceiver", GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY, Gst.Caps.from_string("application/x-rtp,media=video,encoding-name=H264,payload=96"))
-    #webrtc.emit("add-transceiver", GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY, None)
     # start pipeline
     pipe.set_state(Gst.State.PLAYING)
     log("[GST] pipeline PLAYING")
