@@ -129,6 +129,8 @@ def make_pipeline(rfd: int) -> tuple[Gst.Pipeline, Any]:
     turn_pass = os.environ.get("TURN_PASS", "pocpass")
     turn_host = os.environ.get("TURN_HOST", "79-76-127-159.nip.io")
     
+    log(f"[TURN] Using server: turn://{turn_usr}:***@{turn_host}:3478")
+    
     # Try multiple TURN endpoints with different transports
     desc = (
         f"fdsrc fd={rfd} ! queue ! h264parse ! "
@@ -149,6 +151,11 @@ def make_pipeline(rfd: int) -> tuple[Gst.Pipeline, Any]:
     wb = p.get_by_name("wb")
     if not wb:
         raise RuntimeError("Cannot find webrtcbin element 'wb'")
+    
+    # List all properties for debugging
+    log("[DEBUG] webrtcbin properties:")
+    for prop in wb.list_properties():
+        log(f"  - {prop.name}: {prop.value_type}")
 
     return p, wb
 
