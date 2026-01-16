@@ -172,6 +172,17 @@ def on_bus_message(bus: Gst.Bus, message: Gst.Message):
         log("[GST] WARN:", err, dbg)
     elif t == Gst.MessageType.EOS:
         log("[GST] EOS")
+    elif t == Gst.MessageType.STATE_CHANGED:
+        # Don't log all state changes, too verbose
+        pass
+    elif t == Gst.MessageType.INFO:
+        info, dbg = message.parse_info()
+        log(f"[GST] INFO: {info}, {dbg}")
+    else:
+        # Log other message types that might contain TURN errors
+        struct = message.get_structure()
+        if struct and "ice" in struct.get_name().lower():
+            log(f"[GST] {message.type}: {struct.to_string()}")
     return True
 
 def on_ice_candidate(wb, mlineindex, candidate):
@@ -499,6 +510,18 @@ async def ws_loop():
 
     # callbacks
     webrtc.connect("on-ice-candidate", on_ice_candidate)
+    
+    # Monitor ICE gathering state
+    def on_notify_ice_gathering_state(pspec, user_data):
+        state = webrtc.get_property("ice-gathering-state")
+        log(f"[ICE] Gathering state: {state}")
+    
+    def on_notify_ice_connection_state(pspec, user_data):
+        state = webrtc.get_property("ice-connection-state")
+        log(f"[ICE] Connection state: {state}")
+    
+    webrtc.connect("notify::ice-gathering-state", on_notify_ice_gathering_state, None)
+    webrtc.connect("notify::ice-connection-state", on_notify_ice_connection_state, None)
     # webrtc.connect("on-data-channel", on_data_channel)  # dc created by us
     # start pipeline
     pipe.set_state(Gst.State.PLAYING)
