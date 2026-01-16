@@ -152,10 +152,13 @@ def make_pipeline(rfd: int) -> tuple[Gst.Pipeline, Any]:
     if not wb:
         raise RuntimeError("Cannot find webrtcbin element 'wb'")
     
-    # List all properties for debugging
-    log("[DEBUG] webrtcbin properties:")
-    for prop in wb.list_properties():
-        log(f"  - {prop.name}: {prop.value_type}")
+    # Force relay-only mode (equivalent to browser's iceTransportPolicy: "relay")
+    try:
+        from gi.repository import GstWebRTC
+        wb.set_property("ice-transport-policy", GstWebRTC.WebRTCICETransportPolicy.RELAY)
+        log("[ICE] Set ice-transport-policy to RELAY")
+    except Exception as e:
+        log(f"[ICE] Warning: Could not set ice-transport-policy: {e}")
 
     return p, wb
 
