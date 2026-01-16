@@ -175,13 +175,30 @@ def on_bus_message(bus: Gst.Bus, message: Gst.Message):
     return True
 
 def on_ice_candidate(wb, mlineindex, candidate):
-    # UJEDNOLICONE Z INDEX.HTML:
-    # wysyłamy: {type:"ice", candidate:{candidate, sdpMLineIndex, sdpMid}}
+    """Handle ICE candidate generation. Log and send to remote peer."""
+    cand_str = str(candidate)
+    
+    # Parse candidate type from string
+    cand_type = "unknown"
+    if "typ host" in cand_str:
+        cand_type = "host"
+    elif "typ srflx" in cand_str:
+        cand_type = "srflx"
+    elif "typ relay" in cand_str:
+        cand_type = "relay"
+    
+    # Extract IP address (4th field in candidate string)
+    parts = cand_str.split()
+    ip_addr = parts[4] if len(parts) > 4 else "?"
+    
+    log(f"[ICE] Local candidate [{cand_type}]: {ip_addr} - {cand_str[:80]}...")
+    
+    # Send to remote peer via WebSocket
     _run_coro_threadsafe(
         ws_send({
             "type": "ice",
             "candidate": {
-                "candidate": str(candidate),
+                "candidate": cand_str,
                 "sdpMLineIndex": int(mlineindex),
                 "sdpMid": "0"
             }
