@@ -58,8 +58,8 @@ function makePc() {
   ];
 
   pc = new RTCPeerConnection({ 
-    iceServers: iceServers,
-    iceTransportPolicy: "relay"
+    iceServers: iceServers
+    // iceTransportPolicy: "relay"  // Temporarily disabled for testing
   });
   
   pc.remoteDescriptionPending = false;
@@ -83,7 +83,10 @@ function makePc() {
 
   pc.onicecandidate = (ev) => {
     if (ev.candidate) {
+      log("Local ICE candidate:", ev.candidate.candidate.substring(0, 60) + "...");
       ws.send(JSON.stringify({ type: "ice", candidate: ev.candidate }));
+    } else {
+      log("ICE gathering complete");
     }
   };
 
@@ -149,10 +152,13 @@ document.getElementById("connect").onclick = async () => {
         log("Queuing ICE candidate (no remote description yet)");
         pc.iceCandidateQueue.push(msg.candidate);
       } else {
+        const candStr = msg.candidate.candidate ? msg.candidate.candidate.substring(0, 60) : "empty";
+        log("Adding remote ICE candidate:", candStr + "...");
         try {
           await pc.addIceCandidate(msg.candidate);
+          log("✓ Candidate added successfully");
         } catch (e) {
-          log("addIceCandidate error:", e.message);
+          log("✗ addIceCandidate error:", e.message);
         }
       }
     }
