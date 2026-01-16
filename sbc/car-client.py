@@ -65,6 +65,7 @@ asyncio_loop: Optional[asyncio.AbstractEventLoop] = None
 stopping = False
 
 glib_loop: Optional[GLib.MainLoop] = None
+ice_candidate_queue: list = []  # Queue for ICE candidates before remote description is set
 
 def log(*a):
     """Log with timestamp."""
@@ -377,7 +378,6 @@ def on_set_remote_done(promise: Gst.Promise, *_):
         log(f"[SDP] Promise replied, reply: {reply}")
         remote_desc_set = True
         log("[SDP] Remote description set successfully")
-        process_queued_ice_candidates()
     elif result == Gst.PromiseResult.INTERRUPTED:
         log("[SDP] Promise interrupted")
     elif result == Gst.PromiseResult.EXPIRED:
