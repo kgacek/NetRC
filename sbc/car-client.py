@@ -63,8 +63,6 @@ webrtc: Optional[Any] = None
 rpicam_proc: Optional[subprocess.Popen] = None
 asyncio_loop: Optional[asyncio.AbstractEventLoop] = None
 stopping = False
-remote_desc_set = False  # Track if remote description is ready
-ice_candidate_queue: list = []  # Queue for ICE candidates
 
 glib_loop: Optional[GLib.MainLoop] = None
 
@@ -125,20 +123,26 @@ def make_pipeline(rfd: int) -> tuple[Gst.Pipeline, Any]:
     """Create H264 video pipeline with WebRTC sink."""
     # Pipeline: fdsrc -> h264parse -> rtph264pay -> application/x-rtp -> webrtcbin
     # Note: "wb." requests dynamic sink pad from webrtcbin
+    
+    # Your TURN server configuration
     turn_usr = os.environ.get("TURN_USER", "pocuser")
     turn_pass = os.environ.get("TURN_PASS", "pocpass")
     turn_host = os.environ.get("TURN_HOST", "79-76-127-159.nip.io")
+    turn_port = os.environ.get("TURN_PORT", "3478")
     
-    log(f"[TURN] Using server: turn://{turn_usr}:***@{turn_host}:3478")
+    log(f"[TURN] Using server: turn://{turn_usr}:***@{turn_host}:{turn_port}")
     
-    # Try multiple TURN endpoints with different transports
+    # GStreamer webrtcbin requires simple URL without ?transport parameter
+    # The transport is auto-negotiated
+    turn_url = f"turn://{turn_usr}:{turn_pass}@{turn_host}:{turn_port}"
+    
     desc = (
         f"fdsrc fd={rfd} ! queue ! h264parse ! "
         f"rtph264pay pt=96 config-interval=1 ! "
         f"application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000 ! "
         f"queue ! wb. "
         f"webrtcbin name=wb bundle-policy=max-bundle "
-        f"turn-server=\"turn://{turn_usr}:{turn_pass}@{turn_host}:3478?transport=udp\" "
+        f"turn-server=\"{turn_url}\" "
     )
 
     try:
@@ -258,9 +262,7 @@ def on_data_channel(wb: Any, channel: Any) -> None:
 
 
 def add_ice_candidate_from_msg(msg: Dict[str, Any]):
-    """Add ICE candidate from message. Queue if remote description not yet set."""
-    global remote_desc_set, ice_candidate_queue
-    
+    """Add ICE candidate from message."""
     if webrtc is None:
         return
 
@@ -271,12 +273,12 @@ def add_ice_candidate_from_msg(msg: Dict[str, Any]):
     if not cand:
         return
     
-    # Queue if remote description not ready
-    if not remote_desc_set:
-        log(f"[ICE] Queuing candidate (remote desc not ready): {cand[:50]}...")
-        ice_candidate_queue.append((int(mline), str(cand)))
-    else:
+    # Simply add candidate - GStreamer will queue internally if needed
+    log(f"[ICE] Adding remote candidate: {cand[:50]}...")
+    try:
         webrtc.emit("add-ice-candidate", int(mline), str(cand))
+    except Exception as e:
+        log(f"[ICE] Error adding candidate: {e}")
 
 
 def process_queued_ice_candidates():
@@ -596,9 +598,9 @@ def shutdown(*_):
     sys.exit(0)
 
 if __name__ == "__main__":
-    # Enable GStreamer debug for webrtc and nice (ICE library)
-    import os
-    os.environ["GST_DEBUG"] = "webrtcbin:5,nice:5,nicesrc:5,nicesink:5"
+    # Disable verbose debug for now
+    # import os
+    # os.environ["GST_DEBUG"] = "webrtcbin:5,nice:5,nicesrc:5,nicesink:5"
     
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
