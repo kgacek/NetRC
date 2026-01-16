@@ -302,6 +302,8 @@ def set_remote_description(sdp_type: str, sdp_text: str):
     if webrtc is None:
         return
 
+    log(f"[SDP] Setting remote {sdp_type}, length: {len(sdp_text)}")
+    
     res, sdpmsg = GstSdp.SDPMessage.new()
     if res != GstSdp.SDPResult.OK:
         raise RuntimeError(f"SDPMessage.new() failed: {res}")
@@ -321,17 +323,23 @@ def on_set_remote_done(promise: Gst.Promise, *_):
     """Remote SDP has been set. Process queued ICE candidates."""
     global remote_desc_set
     
-    promise.wait()
-    reply = promise.get_reply()
-    if reply is None:
-        log("[SDP] set-remote-description failed: reply is None")
-        return
+    result = promise.wait()
+    log(f"[SDP] promise.wait() result: {result}")
     
-    remote_desc_set = True
-    log("[SDP] remote description set")
-    
-    # Process any queued ICE candidates
-    process_queued_ice_candidates()
+    # Check for errors in promise
+    if result == Gst.PromiseResult.REPLIED:
+        reply = promise.get_reply()
+        # Reply can be None even on success for set-remote-description
+        log(f"[SDP] Promise replied, reply: {reply}")
+        remote_desc_set = True
+        log("[SDP] Remote description set successfully")
+        process_queued_ice_candidates()
+    elif result == Gst.PromiseResult.INTERRUPTED:
+        log("[SDP] Promise interrupted")
+    elif result == Gst.PromiseResult.EXPIRED:
+        log("[SDP] Promise expired")
+    else:
+        log(f"[SDP] Promise result unknown: {result}")
 
 def on_offer_created(promise: Gst.Promise, *_):
     if webrtc is None:
