@@ -220,7 +220,7 @@ def on_ice_candidate(wb, mlineindex, candidate):
             "candidate": {
                 "candidate": cand_str,
                 "sdpMLineIndex": int(mlineindex),
-                "sdpMid": "0"
+                "sdpMid": None
             }
         })
     )
@@ -267,17 +267,27 @@ def add_ice_candidate_from_msg(msg: Dict[str, Any]):
     if webrtc is None:
         return
 
+    # Extract candidate object from message
     ice = msg.get("candidate") or msg.get("ice") or {}
+    
+    # The candidate string should be in the 'candidate' field
     cand = ice.get("candidate")
     mline = ice.get("sdpMLineIndex", 0)
 
     if not cand:
+        log(f"[ICE] Empty candidate in message: {msg}")
         return
     
-    # Simply add candidate - GStreamer will queue internally if needed
-    log(f"[ICE] Adding remote candidate: {cand[:50]}...")
+    # Log the full candidate for debugging
+    log(f"[ICE] Received candidate from browser: {cand}")
+    log(f"[ICE] mlineIndex: {mline}")
+    
+    # GStreamer expects the raw candidate string
     try:
         webrtc.emit("add-ice-candidate", int(mline), str(cand))
+        log(f"[ICE] Successfully added candidate via GStreamer")
+    except Exception as e:
+        log(f"[ICE] Error adding candidate via GStreamer: {e}")
     except Exception as e:
         log(f"[ICE] Error adding candidate: {e}")
 

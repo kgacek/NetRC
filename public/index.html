@@ -41,17 +41,7 @@ let ws, pc, dc;
 function makePc() {
   const iceServers = [
     {
-      urls: "turn:79-76-127-159.nip.io:3478?transport=udp",
-      username: "pocuser",
-      credential: "pocpass"
-    },
-    {
-      urls: "turn:79-76-127-159.nip.io:3478?transport=tcp",
-      username: "pocuser",
-      credential: "pocpass"
-    },
-    {
-      urls: "turns:79-76-127-159.nip.io:5349?transport=tcp",
+      urls: ["turn:79-76-127-159.nip.io:3478"],
       username: "pocuser",
       credential: "pocpass"
     }
