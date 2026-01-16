@@ -125,7 +125,13 @@ def make_pipeline(rfd: int) -> tuple[Gst.Pipeline, Any]:
     # Note: "wb." requests dynamic sink pad from webrtcbin
     turn_usr = os.environ.get("TURN_USER", "pocuser")
     turn_pass = os.environ.get("TURN_PASS", "pocpass")
-    turn_srv = f"turn://{turn_usr}:{turn_pass}@79-76-127-159.nip.io:3478?transport=tcp"
+    # Support multiple TURN transports
+    turn_servers = [
+        f"turn://{turn_usr}:{turn_pass}@79-76-127-159.nip.io:3478?transport=udp",
+        f"turn://{turn_usr}:{turn_pass}@79-76-127-159.nip.io:3478?transport=tcp",
+        f"turns://{turn_usr}:{turn_pass}@79-76-127-159.nip.io:5349?transport=tcp"
+    ]
+    turn_srv_str = " ".join([f"turn-server={srv}" for srv in turn_servers])
     
     desc = (
         f"fdsrc fd={rfd} ! queue ! h264parse ! "
@@ -133,8 +139,7 @@ def make_pipeline(rfd: int) -> tuple[Gst.Pipeline, Any]:
         f"application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000 ! "
         f"queue ! wb. "
         f"webrtcbin name=wb bundle-policy=max-bundle "
-        f"ice-transport-policy=relay "
-        f"turn-server={turn_srv} "
+        f"{turn_srv_str} "
     )
 
     try:
