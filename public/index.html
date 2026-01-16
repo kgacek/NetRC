@@ -55,6 +55,9 @@ function makePc() {
     iceServers,
     iceTransportPolicy: "relay"
   });
+  
+  pc.remoteDescriptionPending = false;
+  pc.iceCandidateQueue = [];
 
   // Firefox wymaga jawnego transceiver
   if (navigator.userAgent.includes("Firefox")) {
@@ -87,11 +90,25 @@ async function startAsViewer() {
 }
 
 async function handleOffer(sdp) {
+  pc.remoteDescriptionPending = true;
   await pc.setRemoteDescription(sdp);
-  // create answer
+  pc.remoteDescriptionPending = false;
+  
+  // Create answer
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
   ws.send(JSON.stringify({ type: "sdp", sdp: pc.localDescription }));
+  
+  // Process queued ICE candidates
+  log("Processing " + pc.iceCandidateQueue.length + " queued ICE candidates");
+  while (pc.iceCandidateQueue.length > 0) {
+    const candidate = pc.iceCandidateQueue.shift();
+    try {
+      await pc.addIceCandidate(candidate);
+    } catch (e) {
+      log("Error adding queued candidate:", e.message);
+    }
+  }
 }
 
 document.getElementById("connect").onclick = async () => {
@@ -118,11 +135,18 @@ document.getElementById("connect").onclick = async () => {
     }
 
     if (msg.type === "ice" && msg.candidate) {
-      try {
-        await pc.addIceCandidate(msg.candidate);
-      } catch (e) {
-        if (!e.message.includes("Error processing ICE candidate")) {
-          log("addIceCandidate error:", e);
+      // Queue candidates until remote description is set
+      if (pc.remoteDescriptionPending) {
+        log("Queuing ICE candidate (remote desc pending)");
+        pc.iceCandidateQueue.push(msg.candidate);
+      } else if (!pc.remoteDescription) {
+        log("Queuing ICE candidate (no remote description yet)");
+        pc.iceCandidateQueue.push(msg.candidate);
+      } else {
+        try {
+          await pc.addIceCandidate(msg.candidate);
+        } catch (e) {
+          log("addIceCandidate error:", e.message);
         }
       }
     }

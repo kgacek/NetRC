@@ -63,6 +63,8 @@ webrtc: Optional[Any] = None
 rpicam_proc: Optional[subprocess.Popen] = None
 asyncio_loop: Optional[asyncio.AbstractEventLoop] = None
 stopping = False
+remote_desc_set = False  # Track if remote description is ready
+ice_candidate_queue: list = []  # Queue for ICE candidates
 
 glib_loop: Optional[GLib.MainLoop] = None
 
@@ -214,7 +216,9 @@ def on_data_channel(wb: Any, channel: Any) -> None:
 
 
 def add_ice_candidate_from_msg(msg: Dict[str, Any]):
-    """Add ICE candidate from message."""
+    """Add ICE candidate from message. Queue if remote description not yet set."""
+    global remote_desc_set, ice_candidate_queue
+    
     if webrtc is None:
         return
 
@@ -222,8 +226,30 @@ def add_ice_candidate_from_msg(msg: Dict[str, Any]):
     cand = ice.get("candidate")
     mline = ice.get("sdpMLineIndex", 0)
 
-    if cand:
+    if not cand:
+        return
+    
+    # Queue if remote description not ready
+    if not remote_desc_set:
+        log(f"[ICE] Queuing candidate (remote desc not ready): {cand[:50]}...")
+        ice_candidate_queue.append((int(mline), str(cand)))
+    else:
         webrtc.emit("add-ice-candidate", int(mline), str(cand))
+
+
+def process_queued_ice_candidates():
+    """Process all queued ICE candidates after remote description is set."""
+    global ice_candidate_queue
+    if webrtc is None:
+        return
+    
+    while ice_candidate_queue:
+        mline, cand = ice_candidate_queue.pop(0)
+        try:
+            log(f"[ICE] Adding queued candidate: {cand[:50]}...")
+            webrtc.emit("add-ice-candidate", mline, cand)
+        except Exception as e:
+            log(f"[ICE] Error adding queued candidate: {e}")
 
 
 def clamp_control(value: float, min_val: float = -CONTROL_RANGE, max_val: float = CONTROL_RANGE) -> float:
@@ -292,16 +318,20 @@ def set_remote_description(sdp_type: str, sdp_text: str):
     webrtc.emit("set-remote-description", desc, promise)
 
 def on_set_remote_done(promise: Gst.Promise, *_):
-    # remote SDP ustawione
-    if webrtc is None:
-        return
-
+    """Remote SDP has been set. Process queued ICE candidates."""
+    global remote_desc_set
+    
     promise.wait()
     reply = promise.get_reply()
     if reply is None:
         log("[SDP] set-remote-description failed: reply is None")
         return
+    
+    remote_desc_set = True
     log("[SDP] remote description set")
+    
+    # Process any queued ICE candidates
+    process_queued_ice_candidates()
 
 def on_offer_created(promise: Gst.Promise, *_):
     if webrtc is None:
