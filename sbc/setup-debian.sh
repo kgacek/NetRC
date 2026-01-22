@@ -13,10 +13,17 @@ echo ""
 echo "[1/6] Updating package list..."
 sudo apt-get update
 
-# Install Python 3 and pip
+# Install Python 3 and pip with build dependencies
 echo ""
-echo "[2/6] Installing Python 3 and pip..."
-sudo apt-get install -y python3 python3-pip
+echo "[2/6] Installing Python 3 and build dependencies..."
+sudo apt-get install -y \
+    python3 \
+    python3-pip \
+    python3-dev \
+    pkg-config \
+    libcairo2-dev \
+    libgirepository1.0-dev \
+    python3-gi
 
 # Install GStreamer and related packages
 echo ""
@@ -45,8 +52,7 @@ echo ""
 echo "[5/6] Installing Python packages..."
 sudo pip3 install \
     websockets \
-    pyserial \
-    pygobject
+    pyserial
 
 # Enable serial port (disable console on serial)
 echo ""
