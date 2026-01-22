@@ -29,9 +29,6 @@ sudo apt-get install -y \
     gstreamer1.0-plugins-ugly \
     gstreamer1.0-libav \
     gstreamer1.0-nice \
-    libgstreamer1.0-dev \
-    libgstreamer-plugins-base1.0-dev \
-    libgstreamer-plugins-bad1.0-dev \
     gir1.2-gst-plugins-base-1.0 \
     gir1.2-gstreamer-1.0 \
     python3-gst-1.0
