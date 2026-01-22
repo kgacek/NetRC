@@ -1,11 +1,11 @@
 #!/bin/bash
-# Setup script for car-client.py on Debian 11 (Raspberry Pi OS)
+# Setup script for car-client.py on Debian 11 (Radxa A7Z)
 # Installs all required dependencies
 
 set -e
 
 echo "===================================="
-echo "car-client.py Setup for Debian 11"
+echo "car-client.py Setup for Radxa A7Z"
 echo "===================================="
 
 # Update package list
@@ -33,10 +33,12 @@ sudo apt-get install -y \
     gir1.2-gstreamer-1.0 \
     python3-gst-1.0
 
-# Install rpicam tools (libcamera)
+# Install v4l2 and ffmpeg for camera on Radxa A7Z
 echo ""
-echo "[4/6] Installing rpicam-vid (libcamera)..."
-sudo apt-get install -y libcamera-apps
+echo "[4/6] Installing camera tools (v4l2, ffmpeg)..."
+sudo apt-get install -y \
+    v4l-utils \
+    ffmpeg
 
 # Install Python dependencies
 echo ""
@@ -49,16 +51,9 @@ sudo pip3 install \
 # Enable serial port (disable console on serial)
 echo ""
 echo "[6/6] Configuring serial port..."
-if [ -f /boot/cmdline.txt ]; then
-    sudo sed -i 's/console=serial0,115200 //' /boot/cmdline.txt
-    echo "Removed console from serial0 in /boot/cmdline.txt"
-fi
-
-# Enable UART in config.txt
-if ! grep -q "^enable_uart=1" /boot/config.txt 2>/dev/null; then
-    echo "enable_uart=1" | sudo tee -a /boot/config.txt
-    echo "Added enable_uart=1 to /boot/config.txt"
-fi
+echo "NOTE: Radxa A7Z typically uses /dev/ttyS0, /dev/ttyS1, or /dev/ttyUSB0"
+echo "Check your board documentation for the correct UART device."
+echo "Console on serial might need to be disabled in /boot/extlinux/extlinux.conf"
 
 # Add user to dialout group for serial port access
 echo ""
@@ -71,11 +66,11 @@ echo "Installation complete!"
 echo "===================================="
 echo ""
 echo "IMPORTANT NOTES:"
-echo "1. Serial port has been configured (/dev/serial0)"
-echo "2. You may need to REBOOT for serial changes to take effect"
-echo "3. After reboot, log out and back in for group changes to apply"
-echo "4. Test rpicam-vid with: rpicam-vid -t 5000 --codec h264 -o test.h264"
-echo "5. Test serial port with: ls -l /dev/serial0"
+echo "1. Check available serial ports: ls -l /dev/ttyS* /dev/ttyUSB*"
+echo "2. List camera devices: v4l2-ctl --list-devices"
+echo "3. Test camera: ffmpeg -f v4l2 -i /dev/video0 -t 5 -c:v h264 test.h264"
+echo "4. Update UART_DEV in car-client.py to match your serial port"
+echo "5. Log out and back in for group changes to apply"
 echo ""
 echo "To run car-client.py:"
 echo "  cd $(dirname $(readlink -f $0))"

@@ -25,7 +25,7 @@ Gst.init(None)
 SIGNALING_URL = "wss://79-76-127-159.nip.io/"   # nginx reverse proxy -> node ws
 ROOM_ID = "test1"
 
-UART_DEV = "/dev/serial0"
+UART_DEV = "/dev/ttyS0"  # Radxa A7Z - zmień na /dev/ttyS1 lub /dev/ttyUSB0 jeśli potrzeba
 UART_BAUD = 115200
 
 # Control ranges
@@ -33,17 +33,20 @@ THROTTLE_MIN, THROTTLE_MAX = 0, 1000
 STEER_MIN, STEER_MAX = -1000, 1000
 CONTROL_RANGE = 1.0  # ±1.0 from browser
 
-# Kamera: H264 w stdout (ważne: --nopreview)
+# Kamera: H264 w stdout (ffmpeg dla Radxa A7Z z kamerą USB/CSI)
 RPICAM_CMD = [
-    "rpicam-vid",
-    "-t", "0",
-    "--width", "640",
-    "--height", "480",
-    "--framerate", "15",
-    "--codec", "h264",
-    "--inline",
-    "--nopreview",
-    "-o", "-"
+    "ffmpeg",
+    "-f", "v4l2",
+    "-input_format", "mjpeg",
+    "-video_size", "640x480",
+    "-framerate", "15",
+    "-i", "/dev/video0",  # Zmień na /dev/video1 itp. jeśli potrzeba
+    "-c:v", "libx264",
+    "-preset", "ultrafast",
+    "-tune", "zerolatency",
+    "-pix_fmt", "yuv420p",
+    "-f", "h264",
+    "-"
 ]
 
 # ===== UART =====
