@@ -192,13 +192,25 @@ def on_bus_message(bus: Gst.Bus, message: Gst.Message):
     return True
 
 def on_ice_candidate(wb, mlineindex, candidate):
-    """Handle ICE candidate generation. Log and send to remote peer."""
+    """Handle ICE candidate generation. Log and send to remote peer.
+    
+    Wywoływane przez GStreamer gdy zostanie wygenerowany nowy kandydat ICE.
+    Kandydaty są wysyłane do przeglądarki przez WebSocket.
+    
+    Args:
+        wb: WebRTC bin element
+        mlineindex: Indeks linii w SDP (0 dla pierwszego media stream)
+        candidate: Obiekt kandydata ICE z GStreamer
+    """
     cand_str = str(candidate)
     
-    # Log full candidate first
+    # Loguj pełny candidate string do debugowania
     log(f"[ICE] Local candidate (full): {cand_str}")
     
-    # Parse candidate type from string
+    # Parsuj typ kandydata ze stringa (host/srflx/relay)
+    # - host: lokalne IP urządzenia
+    # - srflx: publiczne IP z STUN (Server Reflexive)
+    # - relay: IP z TURN server (najbardziej niezawodny, ale wymaga TURN)
     cand_type = "unknown"
     if "typ host" in cand_str:
         cand_type = "host"
@@ -207,20 +219,22 @@ def on_ice_candidate(wb, mlineindex, candidate):
     elif "typ relay" in cand_str:
         cand_type = "relay"
     
-    # Extract IP address (4th field in candidate string)
+    # Wyciągnij adres IP (4-te pole w candidate string)
     parts = cand_str.split()
     ip_addr = parts[4] if len(parts) > 4 else "?"
     
     log(f"[ICE] Type: {cand_type}, IP: {ip_addr}")
     
-    # Send to remote peer via WebSocket
+    # Wyślij kandydata do przeglądarki przez WebSocket
+    # Format zgodny z RTCIceCandidate (WebRTC standard)
+    # sdpMid=None jest OK dla prostych przypadków (automatycznie dopasowane)
     _run_coro_threadsafe(
         ws_send({
             "type": "ice",
             "candidate": {
                 "candidate": cand_str,
                 "sdpMLineIndex": int(mlineindex),
-                "sdpMid": None
+                "sdpMid": None  # None = auto, lub "0" dla konkretnego media stream
             }
         })
     )
@@ -263,14 +277,24 @@ def on_data_channel(wb: Any, channel: Any) -> None:
 
 
 def add_ice_candidate_from_msg(msg: Dict[str, Any]):
-    """Add ICE candidate from message."""
+    """Add ICE candidate from message received from browser.
+    
+    Odbiera kandydata ICE od przeglądarki i dodaje go do WebRTC connection.
+    Kandydaty muszą być dodane PRZED lub PO ustawieniu remote description,
+    ale GStreamer obsługuje kolejkowanie wewnętrznie jeśli trzeba.
+    
+    Args:
+        msg: Wiadomość JSON z WebSocket zawierająca kandidata
+    """
     if webrtc is None:
         return
 
-    # Extract candidate object from message
+    # Wyciągnij obiekt kandydata z wiadomości
+    # Format: {"type":"ice", "candidate":{"candidate":"...", "sdpMLineIndex":0}}
     ice = msg.get("candidate") or msg.get("ice") or {}
     
-    # The candidate string should be in the 'candidate' field
+    # Kandydat to string w formacie ICE (RFC 5245)
+    # Przykład: "candidate:1 1 UDP 2015363327 192.168.1.100 54321 typ host"
     cand = ice.get("candidate")
     mline = ice.get("sdpMLineIndex", 0)
 
@@ -278,11 +302,13 @@ def add_ice_candidate_from_msg(msg: Dict[str, Any]):
         log(f"[ICE] Empty candidate in message: {msg}")
         return
     
-    # Log the full candidate for debugging
+    # Loguj pełnego kandydata do debugowania
+    # Ważne przy problemach z połączeniem (np. czy relay działa)
     log(f"[ICE] Received candidate from browser: {cand}")
     log(f"[ICE] mlineIndex: {mline}")
     
-    # GStreamer expects the raw candidate string
+    # GStreamer oczekuje raw candidate string (bez "a=" prefix)
+    # Emit signal do webrtcbin aby dodał kandydata
     try:
         webrtc.emit("add-ice-candidate", int(mline), str(cand))
         log(f"[ICE] Successfully added candidate via GStreamer")

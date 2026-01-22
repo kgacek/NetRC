@@ -39,8 +39,14 @@ let ws, pc, dc;
 
 
 function makePc() {
+  // Konfiguracja TURN servera dla relay połączeń
+  // TURN jest niezbędny gdy klienci są za NAT/firewall
+  // i nie mogą się połączyć bezpośrednio (host/srflx)
   const iceServers = [
     {
+      // Używamy tylko TURN (bez STUN), serwer automatycznie wybierze UDP/TCP
+      // Port 3478 = standardowy port TURN (UDP/TCP)
+      // Port 5349 = TURN over TLS (wyłączony dla uproszczenia)
       urls: ["turn:79-76-127-159.nip.io:3478"],
       username: "pocuser",
       credential: "pocpass"
@@ -49,13 +55,17 @@ function makePc() {
 
   pc = new RTCPeerConnection({ 
     iceServers: iceServers,
+    // iceTransportPolicy: "relay" wymusza używanie TYLKO TURN relay
+    // (ignoruje host i srflx candidates) - dobre do testowania TURN
+    // Zmień na "all" aby pozwolić na wszystkie typy połączeń
     iceTransportPolicy: "relay"
   });
   
+  // Flagi do obsługi kolejkowania ICE candidates
   pc.remoteDescriptionPending = false;
   pc.iceCandidateQueue = [];
 
-  // Firefox wymaga jawnego transceiver
+  // Firefox wymaga jawnego transceiver dla odbierania video
   if (navigator.userAgent.includes("Firefox")) {
     pc.addTransceiver("video", { direction: "recvonly" });
   }
@@ -143,15 +153,23 @@ document.getElementById("connect").onclick = async () => {
         log("Queuing ICE candidate (remote desc pending)");
         pc.iceCandidateQueue.push(msg.candidate);
       } else if (!pc.remoteDescription) {
+        // Kolejkuj kandydata jeśli remote description jeszcze nie istnieje
         log("Queuing ICE candidate (no remote description yet)");
         pc.iceCandidateQueue.push(msg.candidate);
       } else {
+        // Remote description ustawiony - możemy dodawać kandydatów bezpośrednio
         const candStr = msg.candidate.candidate ? msg.candidate.candidate.substring(0, 60) : "empty";
         log("Adding remote ICE candidate:", candStr + "...");
         try {
+          // Dodaj kandydata do RTCPeerConnection
+          // Przegląda sprawdzi czy kandydat jest kompatybilny i spróbuje połączenia
           await pc.addIceCandidate(msg.candidate);
           log("✓ Candidate added successfully");
         } catch (e) {
+          // Błąd może wystąpić gdy:
+          // - Format kandydata jest nieprawidłowy
+          // - iceTransportPolicy="relay" odrzuca host/srflx candidates
+          // - Kandydat nie pasuje do SDP
           log("✗ addIceCandidate error:", e.message);
         }
       }
@@ -167,11 +185,11 @@ let steering = 0;   // -1..1 (A/D)
 
 const keys = { w:false, a:false, s:false, d:false };
 
-// parametry "feelingu"
+// Parametry "feelingu" sterowania
 const SEND_HZ = 50;
 const DT = 1 / SEND_HZ;
 
-// jak szybko narasta przy trzymaniu (na sekundę)
+// Jak szybko narasta przy trzymaniu klawisza (na sekundę)
 const THROTTLE_RATE = 1.6; // 0..1 w ~0.6s
 const STEER_RATE    = 2.8; // skręt szybciej
 
