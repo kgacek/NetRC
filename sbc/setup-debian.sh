@@ -44,10 +44,12 @@ sudo apt-get install -y libcamera-apps
 # Install Python dependencies
 echo ""
 echo "[5/6] Installing Python packages..."
-sudo pip3 install \
-    websockets \
-    pyserial \
-    pygobject
+sudo apt-get install -y \
+    python3-serial \
+    python3-gi
+
+# websockets nie ma w apt, instalujemy z pip
+sudo pip3 install --break-system-packages websockets
 
 # Enable serial port (disable console on serial)
 echo ""
