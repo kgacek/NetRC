@@ -384,29 +384,28 @@ async def send_offer_to_cloudflare(offer_sdp: str):
 
 async def send_ice_candidate(mline: int, candidate: str):
     """Send ICE candidate to Cloudflare SFU."""
-    if not session_id:
-        log("[ICE] Skipping - no session yet")
+    if not session_id or not track_id:
+        log("[ICE] Skipping - no session/track yet")
         return
     
     try:
-        url = f"{CF_REALTIME_API}/{CF_REALTIME_APP_ID}/sessions/{session_id}/tracks/new"
+        # CORRECT endpoint for trickle ICE
+        url = f"{CF_REALTIME_API}/{CF_REALTIME_APP_ID}/sessions/{session_id}/tracks/{track_id}/trickle"
         headers = {
             "Authorization": f"Bearer {CF_REALTIME_TOKEN}",
             "Content-Type": "application/json"
         }
         
         payload = {
-            "iceCandidate": {
-                "candidate": candidate,
-                "sdpMLineIndex": mline
-            }
+            "candidate": candidate,
+            "sdpMLineIndex": mline
         }
         
-        response = requests.post(url, json=payload, headers=headers, timeout=5)
-        if response.status_code == 200 or response.status_code == 201:
-            log(f"[ICE] ✓ Sent to Cloudflare")
+        response = requests.put(url, json=payload, headers=headers, timeout=5)
+        if response.status_code == 200 or response.status_code == 204:
+            log(f"[ICE] ✓ Trickle ICE sent to Cloudflare")
         else:
-            log(f"[ICE] Error: {response.status_code}")
+            log(f"[ICE] Error: {response.status_code} - {response.text[:100]}")
             
     except Exception as e:
         log(f"[ICE] Send error: {e}")
@@ -473,21 +472,46 @@ async def cloudflare_sfu_loop():
         webrtc.connect("on-ice-candidate", on_ice_candidate)
         webrtc.connect("on-data-channel", on_data_channel)
         
-        # Monitor states
+        # Monitor states with more detail
         def on_notify_ice_gathering_state(obj, pspec):
             state = webrtc.get_property("ice-gathering-state")
-            log(f"[ICE] Gathering state: {state}")
+            state_name = str(state).split('_')[-1]
+            log(f"[ICE] Gathering: {state_name}")
         
         def on_notify_ice_connection_state(obj, pspec):
             state = webrtc.get_property("ice-connection-state")
-            log(f"[ICE] Connection state: {state}")
+            state_name = str(state).split('_')[-1]
+            log(f"[ICE] Connection: {state_name}")
+            
+            # If connection fails, log more details
+            if "FAILED" in str(state):
+                log("[ICE] ✗ Connection FAILED - possible causes:")
+                log("[ICE]   - DTLS handshake failed")
+                log("[ICE]   - Firewall blocking UDP")
+                log("[ICE]   - No media flowing from camera")
+                log("[ICE]   - Cloudflare timeout")
+        
+        def on_notify_connection_state(obj, pspec):
+            state = webrtc.get_property("connection-state")
+            state_name = str(state).split('_')[-1]
+            log(f"[WebRTC] Connection: {state_name}")
+        
+        def on_notify_signaling_state(obj, pspec):
+            state = webrtc.get_property("signaling-state")
+            state_name = str(state).split('_')[-1]
+            log(f"[WebRTC] Signaling: {state_name}")
         
         webrtc.connect("notify::ice-gathering-state", on_notify_ice_gathering_state)
         webrtc.connect("notify::ice-connection-state", on_notify_ice_connection_state)
+        webrtc.connect("notify::connection-state", on_notify_connection_state)
+        webrtc.connect("notify::signaling-state", on_notify_signaling_state)
         
-        # Start pipeline
+        # Start pipeline BEFORE creating transceiver/offer
         pipe.set_state(Gst.State.PLAYING)
         log("[GST] Pipeline PLAYING")
+        
+        # Wait a bit for pipeline to start producing data
+        await asyncio.sleep(0.5)
         
         # Add video transceiver
         webrtc.emit(
@@ -503,6 +527,13 @@ async def cloudflare_sfu_loop():
         log("[CF] Streaming to Cloudflare Realtime SFU...")
         while not stopping:
             await asyncio.sleep(1)
+            
+            # Periodic status check
+            if webrtc:
+                ice_state = webrtc.get_property("ice-connection-state")
+                if "FAILED" in str(ice_state):
+                    log("[ICE] Connection failed - restarting might be needed")
+                    break
             
     except Exception as e:
         log(f"[CF] Error: {e}")
