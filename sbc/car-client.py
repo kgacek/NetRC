@@ -299,7 +299,7 @@ async def send_offer_to_cloudflare(offer_sdp: str):
         return
     
     try:
-        # Create new session
+        # Create new session with a named track
         url = f"{CF_REALTIME_API}/{CF_REALTIME_APP_ID}/sessions/new"
         headers = {
             "Authorization": f"Bearer {CF_REALTIME_TOKEN}",
@@ -310,7 +310,11 @@ async def send_offer_to_cloudflare(offer_sdp: str):
             "sessionDescription": {
                 "type": "offer",
                 "sdp": offer_sdp
-            }
+            },
+            "tracks": [{
+                "location": "local",
+                "trackName": "car-video"  # Named track that browser can pull
+            }]
         }
         
         log(f"[CF] Creating session...")
@@ -323,7 +327,7 @@ async def send_offer_to_cloudflare(offer_sdp: str):
             session_id = data.get("sessionId")
             answer_sdp = data.get("sessionDescription", {}).get("sdp")
             
-            # Extract track info if needed
+            # Extract track info
             tracks = data.get("tracks", [])
             if tracks:
                 track_id = tracks[0].get("trackName")
@@ -331,10 +335,10 @@ async def send_offer_to_cloudflare(offer_sdp: str):
             log(f"[CF] ═══════════════════════════════════════")
             log(f"[CF] ✓ Session created!")
             log(f"[CF] SESSION ID: {session_id}")
-            log(f"[CF] ═══════════════════════════════════════")
-            log(f"[CF] Copy this Session ID to your browser!")
             if track_id:
-                log(f"[CF] Track: {track_id}")
+                log(f"[CF] TRACK NAME: {track_id}")
+            log(f"[CF] ═══════════════════════════════════════")
+            log(f"[CF] Copy Session ID to your browser!")
             
             if answer_sdp:
                 set_remote_description(answer_sdp)

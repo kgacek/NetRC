@@ -43,21 +43,20 @@ app.post("/api/join-session", async (req, res) => {
     const fetch = (await import('node-fetch')).default;
     
     // Create new pull track on existing session
-    // The browser wants to PULL video from the car's session
+    // Pull the "car-video" track from the car's session
     const url = `https://rtc.live.cloudflare.com/v1/apps/${CF_APP_ID}/sessions/${sessionId}/tracks/new`;
     
     const payload = {
       sessionDescription: offer,
       tracks: [{
         location: 'remote',
-        trackName: `browser-pull-${Date.now()}`,
-        sessionId: sessionId  // IMPORTANT: Must specify which session to pull from
+        trackName: 'car-video',  // Pull the named track from car
+        sessionId: sessionId
       }]
     };
     
-    console.log('[PROXY] Creating pull track...');
+    console.log('[PROXY] Creating pull track for car-video...');
     console.log('[PROXY] Session ID:', sessionId);
-    console.log('[PROXY] Payload:', JSON.stringify(payload, null, 2));
     
     const response = await fetch(url, {
       method: 'POST',
@@ -70,7 +69,6 @@ app.post("/api/join-session", async (req, res) => {
     
     const responseText = await response.text();
     console.log('[PROXY] Cloudflare response status:', response.status);
-    console.log('[PROXY] Cloudflare response:', responseText);
     
     if (!response.ok) {
       console.error('[PROXY] Cloudflare error:', responseText);
@@ -78,7 +76,16 @@ app.post("/api/join-session", async (req, res) => {
     }
     
     const data = JSON.parse(responseText);
-    console.log('[PROXY] Successfully created pull track for browser');
+    console.log('[PROXY] Successfully created pull track');
+    
+    // Check if track was found
+    if (data.tracks && data.tracks[0] && data.tracks[0].errorCode) {
+      const trackError = data.tracks[0];
+      console.error('[PROXY] Track error:', trackError.errorDescription);
+      return res.status(404).json({ 
+        error: `Track error: ${trackError.errorDescription}. Make sure car is connected and streaming.` 
+      });
+    }
     
     res.json({ answer: data.sessionDescription });
     
