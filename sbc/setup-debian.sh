@@ -1,17 +1,33 @@
 #!/bin/bash
-# Setup script for car-client.py on Debian 11 (Raspberry Pi OS)
+# Setup script for car-client.py on Raspberry Pi Zero 2 W (Raspberry Pi OS Debian 11/12)
 # Installs all required dependencies
 
 set -e
 
 echo "===================================="
-echo "car-client.py Setup for Debian 11"
+echo "car-client.py Setup for Raspberry Pi Zero 2 W"
 echo "===================================="
+# Detect platform
+ARCH=$(uname -m)
+OS_CODENAME=$(grep VERSION_CODENAME /etc/os-release | cut -d= -f2 || true)
+PI_MODEL=$(tr -d '\0' </proc/device-tree/model 2>/dev/null || echo "Unknown")
+echo "Detected: $PI_MODEL ($ARCH) on ${OS_CODENAME:-unknown}"
 
 # Update package list
 echo ""
 echo "[1/6] Updating package list..."
 sudo apt-get update
+
+# Choose libcamera package name based on OS availability
+RPICAM_PKG="rpicam-apps"
+if ! apt-cache show "$RPICAM_PKG" >/dev/null 2>&1; then
+    RPICAM_PKG="libcamera-apps"
+fi
+if [ "$RPICAM_PKG" = "rpicam-apps" ]; then
+    RPICAM_CMD="rpicam-vid"
+else
+    RPICAM_CMD="libcamera-vid"
+fi
 
 # Install Python 3 and pip
 echo ""
@@ -28,7 +44,7 @@ sudo apt-get install -y \
     gstreamer1.0-plugins-bad \
     gstreamer1.0-plugins-ugly \
     gstreamer1.0-libav \
-    gstreamer1.0-nice \
+    libnice10 \
     libgstreamer1.0-dev \
     libgstreamer-plugins-base1.0-dev \
     libgstreamer-plugins-bad1.0-dev \
@@ -39,7 +55,7 @@ sudo apt-get install -y \
 # Install rpicam tools (libcamera)
 echo ""
 echo "[4/6] Installing rpicam-vid (libcamera)..."
-sudo apt-get install -y libcamera-apps
+sudo apt-get install -y "$RPICAM_PKG"
 
 # Install Python dependencies
 echo ""
@@ -55,8 +71,16 @@ sudo pip3 install --break-system-packages websockets
 echo ""
 echo "[6/6] Configuring serial port..."
 if [ -f /boot/cmdline.txt ]; then
-    sudo sed -i 's/console=serial0,115200 //' /boot/cmdline.txt
-    echo "Removed console from serial0 in /boot/cmdline.txt"
+    # Remove both possible console args for Zero/Zero 2 W
+    sudo sed -i \
+        -e 's/console=serial0,115200 //g' \
+        -e 's/console=serial0,115200//g' \
+        -e 's/console=ttyAMA0,115200 //g' \
+        -e 's/console=ttyAMA0,115200//g' \
+        /boot/cmdline.txt
+    # Normalize spaces
+    sudo sed -i -e 's/  \+/ /g' /boot/cmdline.txt
+    echo "Removed console from serial in /boot/cmdline.txt"
 fi
 
 # Enable UART in config.txt
@@ -79,7 +103,7 @@ echo "IMPORTANT NOTES:"
 echo "1. Serial port has been configured (/dev/serial0)"
 echo "2. You may need to REBOOT for serial changes to take effect"
 echo "3. After reboot, log out and back in for group changes to apply"
-echo "4. Test rpicam-vid with: rpicam-vid -t 5000 --codec h264 -o test.h264"
+echo "4. Test camera with: $RPICAM_CMD -t 5000 --codec h264 -o test.h264"
 echo "5. Test serial port with: ls -l /dev/serial0"
 echo ""
 echo "To run car-client.py:"
