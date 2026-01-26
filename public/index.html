@@ -79,6 +79,29 @@
         .status.success {
             border-left-color: #00ff00;
         }
+        .session-list {
+            margin-bottom: 20px;
+            padding: 15px;
+            background: #2a2a2a;
+            border-radius: 4px;
+        }
+        .session-item {
+            padding: 10px;
+            margin: 5px 0;
+            background: #1a1a1a;
+            border-radius: 4px;
+            cursor: pointer;
+            border: 2px solid transparent;
+        }
+        .session-item:hover {
+            border-color: #0070f3;
+        }
+        .session-item.selected {
+            border-color: #00ff00;
+        }
+        .refresh-btn {
+            min-width: 100px;
+        }
     </style>
 </head>
 <body>
@@ -88,13 +111,23 @@
         <div class="controls">
             <input type="text" id="appId" placeholder="Cloudflare App ID" />
             <input type="text" id="appSecret" placeholder="Cloudflare App Secret" />
-            <input type="text" id="sessionId" placeholder="Session ID (from RPi)" />
+            <input type="text" id="signalingServer" placeholder="Signaling Server" value="http://79-76-127-159.nip.io:8080" />
+            <button class="refresh-btn" onclick="loadSessions()">Refresh Sessions</button>
+        </div>
+
+        <div class="session-list" id="sessionList" style="display: none;">
+            <h3>Available RPi Sessions:</h3>
+            <div id="sessions"></div>
+        </div>
+
+        <div class="controls">
+            <input type="text" id="sessionId" placeholder="RPi Session ID (or select from list)" />
             <button id="connectBtn" onclick="connect()">Connect</button>
             <button id="disconnectBtn" onclick="disconnect()" disabled>Disconnect</button>
         </div>
 
         <div class="video-container">
-            <video id="remoteVideo" autoplay playsinline muted></video>
+            <video id="remoteVideo" autoplay playsinline></video>
         </div>
 
         <div id="status" class="status">
@@ -104,7 +137,8 @@
 
     <script>
         let peerConnection = null;
-        let sessionIdValue = null;
+        let mySessionId = null;
+        let selectedSessionId = null;
 
         function updateStatus(message, type = 'info') {
             const statusEl = document.getElementById('status');
@@ -113,37 +147,100 @@
             console.log(message);
         }
 
-        function extractMidFromSDP(sdp, trackKind) {
-            const lines = sdp.split('\n');
-            let currentMid = null;
-            let currentKind = null;
+        async function loadSessions() {
+            const signalingServer = document.getElementById('signalingServer').value.trim();
             
-            for (const line of lines) {
-                if (line.startsWith('a=mid:')) {
-                    currentMid = line.split(':')[1].trim();
-                } else if (line.startsWith('m=')) {
-                    currentKind = line.split(' ')[0].substring(2);
-                    if (currentKind === trackKind && currentMid) {
-                        return currentMid;
-                    }
-                }
+            if (!signalingServer) {
+                updateStatus('Please enter signaling server URL', 'error');
+                return;
             }
-            return currentMid;
+
+            try {
+                updateStatus('Loading available sessions...');
+                
+                const response = await fetch(`${signalingServer}/api/sessions`);
+                
+                if (!response.ok) {
+                    throw new Error(`Failed to load sessions: ${response.status}`);
+                }
+
+                const sessions = await response.json();
+                console.log('Available sessions:', sessions);
+
+                const sessionsDiv = document.getElementById('sessions');
+                const sessionListDiv = document.getElementById('sessionList');
+
+                if (sessions.length === 0) {
+                    sessionsDiv.innerHTML = '<p style="color: #888;">No active sessions found. Make sure RPi is streaming.</p>';
+                    sessionListDiv.style.display = 'block';
+                    updateStatus('No sessions found', 'error');
+                    return;
+                }
+
+                sessionsDiv.innerHTML = sessions.map(session => {
+                    const age = Math.floor((Date.now() / 1000) - session.timestamp);
+                    return `
+                        <div class="session-item" onclick="selectSession('${session.sessionId}')">
+                            <strong>Session ID:</strong> ${session.sessionId.substring(0, 16)}...<br>
+                            <small>Active since: ${age}s ago</small>
+                        </div>
+                    `;
+                }).join('');
+
+                sessionListDiv.style.display = 'block';
+                updateStatus(`Found ${sessions.length} active session(s)`, 'success');
+
+            } catch (error) {
+                updateStatus(`Error loading sessions: ${error.message}`, 'error');
+                console.error('Load sessions error:', error);
+            }
+        }
+
+        function selectSession(sessionId) {
+            selectedSessionId = sessionId;
+            document.getElementById('sessionId').value = sessionId;
+            
+            // Visual feedback
+            document.querySelectorAll('.session-item').forEach(item => {
+                item.classList.remove('selected');
+            });
+            event.target.closest('.session-item').classList.add('selected');
+            
+            updateStatus('Session selected. Click Connect to start streaming.', 'success');
         }
 
         async function connect() {
             const appId = document.getElementById('appId').value.trim();
             const appSecret = document.getElementById('appSecret').value.trim();
-            sessionIdValue = document.getElementById('sessionId').value.trim();
+            const rpiSessionId = document.getElementById('sessionId').value.trim();
 
-            if (!appId || !appSecret || !sessionIdValue) {
+            if (!appId || !appSecret || !rpiSessionId) {
                 updateStatus('Please fill in all fields', 'error');
                 return;
             }
 
             try {
                 document.getElementById('connectBtn').disabled = true;
-                updateStatus('Connecting to Cloudflare Calls...');
+                updateStatus('Creating viewer session...');
+
+                // Create OUR OWN session (not joining RPi session)
+                const createResponse = await fetch(`https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/new`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${appSecret}`,
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                if (!createResponse.ok) {
+                    throw new Error(`Failed to create session: ${createResponse.status}`);
+                }
+
+                const sessionData = await createResponse.json();
+                mySessionId = sessionData.sessionId;
+                console.log('Created viewer session:', mySessionId);
+
+                updateStatus('Connecting to RPi stream...');
 
                 peerConnection = new RTCPeerConnection({
                     iceServers: [
@@ -158,10 +255,12 @@
                     const video = document.getElementById('remoteVideo');
                     if (event.streams && event.streams[0]) {
                         video.srcObject = event.streams[0];
+                        video.play().catch(e => console.error('Play error:', e));
                     }
                 };
 
                 peerConnection.onconnectionstatechange = () => {
+                    console.log(`Connection state: ${peerConnection.connectionState}`);
                     updateStatus(`Connection state: ${peerConnection.connectionState}`);
                     if (peerConnection.connectionState === 'connected') {
                         updateStatus('Connected! Streaming video...', 'success');
@@ -195,131 +294,55 @@
                     }
                 });
 
-                const videoMid = extractMidFromSDP(peerConnection.localDescription.sdp, 'video');
-                console.log('Extracted video mid:', videoMid);
-                console.log('Full SDP:', peerConnection.localDescription.sdp);
+                console.log('Our SDP offer:', peerConnection.localDescription.sdp);
 
-                if (!videoMid) {
-                    throw new Error('Could not extract video mid from SDP');
-                }
-
-                // Prepare request payload
-                const payload = {
-                    sessionDescription: {
-                        type: 'offer',
-                        sdp: peerConnection.localDescription.sdp
-                    },
-                    tracks: [
-                        {
-                            location: 'remote',
-                            trackName: 'camera',
-                            sessionId: sessionIdValue,
-                            mid: videoMid
-                        }
-                    ]
-                };
-
-                console.log('Request URL:', `https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${sessionIdValue}/tracks/new`);
-                console.log('Request payload:', JSON.stringify(payload, null, 2));
-
-                // Subscribe to the same session - pull remote track
-                updateStatus('Subscribing to camera track...');
-                const response = await fetch(`https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${sessionIdValue}/tracks/new`, {
+                // Pull track from RPi session into OUR session
+                const pullResponse = await fetch(`https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${mySessionId}/tracks/new`, {
                     method: 'POST',
                     headers: {
                         'Authorization': `Bearer ${appSecret}`,
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify(payload)
+                    body: JSON.stringify({
+                        sessionDescription: {
+                            type: 'offer',
+                            sdp: peerConnection.localDescription.sdp
+                        },
+                        tracks: [
+                            {
+                                location: 'remote',
+                                sessionId: rpiSessionId,  // Pull from RPi session
+                                trackName: 'camera'
+                            }
+                        ]
+                    })
                 });
 
-                const responseText = await response.text();
-                console.log('Response status:', response.status);
-                console.log('Response body:', responseText);
+                const pullText = await pullResponse.text();
+                console.log('Pull response status:', pullResponse.status);
+                console.log('Pull response:', pullText);
 
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status} - ${responseText}`);
+                if (!pullResponse.ok) {
+                    throw new Error(`Failed to pull track: ${pullResponse.status} - ${pullText}`);
                 }
 
-                const data = JSON.parse(responseText);
-                console.log('Parsed response:', data);
+                const pullData = JSON.parse(pullText);
+                console.log('Pull data:', pullData);
 
-                // Check for errors in tracks
-                if (data.tracks && data.tracks[0] && data.tracks[0].errorCode) {
-                    console.error('Track error details:', data.tracks[0]);
-                    throw new Error(`Track error: ${data.tracks[0].errorDescription} (${data.tracks[0].errorCode})`);
+                // Check for errors
+                if (pullData.tracks && pullData.tracks[0] && pullData.tracks[0].errorCode) {
+                    throw new Error(`Track error: ${pullData.tracks[0].errorDescription}`);
                 }
 
-                // Handle renegotiation if required
-                if (data.requiresImmediateRenegotiation) {
-                    console.log('Renegotiation required');
-                    updateStatus('Renegotiating connection...');
-                    
-                    // Create new offer
-                    const newOffer = await peerConnection.createOffer();
-                    await peerConnection.setLocalDescription(newOffer);
-
-                    // Wait for ICE gathering
-                    await new Promise((resolve) => {
-                        if (peerConnection.iceGatheringState === 'complete') {
-                            resolve();
-                        } else {
-                            const checkState = () => {
-                                if (peerConnection.iceGatheringState === 'complete') {
-                                    peerConnection.removeEventListener('icegatheringstatechange', checkState);
-                                    resolve();
-                                }
-                            };
-                            peerConnection.addEventListener('icegatheringstatechange', checkState);
-                        }
-                    });
-
-                    console.log('Renegotiation SDP:', peerConnection.localDescription.sdp);
-
-                    // Renegotiate
-                    const renegResponse = await fetch(`https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${sessionIdValue}/renegotiate`, {
-                        method: 'PUT',
-                        headers: {
-                            'Authorization': `Bearer ${appSecret}`,
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify({
-                            sessionDescription: {
-                                type: 'offer',
-                                sdp: peerConnection.localDescription.sdp
-                            }
-                        })
-                    });
-
-                    const renegText = await renegResponse.text();
-                    console.log('Renegotiation response status:', renegResponse.status);
-                    console.log('Renegotiation response body:', renegText);
-
-                    if (!renegResponse.ok) {
-                        throw new Error(`Renegotiation failed: ${renegResponse.status} - ${renegText}`);
-                    }
-
-                    const renegData = JSON.parse(renegText);
-                    console.log('Renegotiation parsed response:', renegData);
-
-                    if (renegData.sessionDescription) {
-                        await peerConnection.setRemoteDescription({
-                            type: renegData.sessionDescription.type,
-                            sdp: renegData.sessionDescription.sdp
-                        });
-                    }
-                } else if (data.sessionDescription) {
-                    console.log('Setting remote description directly');
-                    // Set remote description
+                if (pullData.sessionDescription) {
                     await peerConnection.setRemoteDescription({
-                        type: data.sessionDescription.type,
-                        sdp: data.sessionDescription.sdp
+                        type: pullData.sessionDescription.type,
+                        sdp: pullData.sessionDescription.sdp
                     });
+                    updateStatus('Waiting for video stream...', 'success');
                 } else {
-                    console.warn('No sessionDescription in response and no renegotiation required');
+                    throw new Error('No session description in response');
                 }
-
-                updateStatus('Waiting for video stream...', 'success');
 
             } catch (error) {
                 updateStatus(`Error: ${error.message}`, 'error');
@@ -347,6 +370,14 @@
         }
 
         window.addEventListener('beforeunload', disconnect);
+
+        // Auto-load sessions on page load if signaling server is set
+        window.addEventListener('load', () => {
+            const signalingServer = document.getElementById('signalingServer').value;
+            if (signalingServer) {
+                setTimeout(loadSessions, 500);
+            }
+        });
     </script>
 </body>
 </html>

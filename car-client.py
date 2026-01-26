@@ -18,6 +18,8 @@ CLOUDFLARE_APP_ID = os.getenv('CF_REALTIME_APP_ID', 'your-app-id')
 CLOUDFLARE_APP_SECRET = os.getenv('CF_REALTIME_TOKEN', 'your-app-secret')
 CLOUDFLARE_API_BASE = 'https://rtc.live.cloudflare.com/v1'
 
+# Signaling server configuration
+SIGNALING_SERVER = os.getenv('SIGNALING_SERVER', 'http://79-76-127-159.nip.io:8080')
 
 class PiCameraTrack(VideoStreamTrack):
     """
@@ -175,6 +177,22 @@ async def send_offer(session_id, offer_sdp):
             return data
 
 
+async def register_session(session_id):
+    """
+    Register session in signaling server
+    """
+    url = f"{SIGNALING_SERVER}/api/publish"
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json={'sessionId': session_id}, timeout=aiohttp.ClientTimeout(total=5)) as response:
+                if response.status != 200:
+                    logger.warning(f"Failed to register with signaling server: {response.status}")
+                else:
+                    logger.info("Session registered with signaling server")
+    except Exception as e:
+        logger.warning(f"Could not connect to signaling server: {e}")
+
 async def run_stream():
     """
     Main function to stream video from Pi Camera
@@ -184,9 +202,15 @@ async def run_stream():
         logger.info("Creating Cloudflare session...")
         session_id = await create_session()
         logger.info(f"Session created: {session_id}")
+        
+        # Register with signaling server
+        await register_session(session_id)
+        
         print(f"\n{'='*60}")
         print(f"SESSION ID: {session_id}")
+        print(f"Signaling Server: {SIGNALING_SERVER}")
         print(f"Use this Session ID in the browser to connect!")
+        print(f"Or browse to {SIGNALING_SERVER} to see available sessions")
         print(f"{'='*60}\n")
         
         # Create peer connection with proper configuration
