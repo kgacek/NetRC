@@ -2,8 +2,12 @@ const express = require("express");
 const http = require("http");
 
 // Cloudflare Realtime (Calls) credentials z ENV
-const CF_APP_ID = process.env.CF_REALTIME_APP_ID || "";
-const CF_TOKEN = process.env.CF_REALTIME_TOKEN || "";
+const CF_REALTIME_APP_ID = process.env.CF_REALTIME_APP_ID || "";
+const CF_REALTIME_TOKEN = process.env.CF_REALTIME_TOKEN || "";
+
+// Cloudflare TURN credentials (osobne!)
+const CF_TURN_KEY_ID = process.env.CF_TURN_KEY_ID || "";
+const CF_TURN_TOKEN = process.env.CF_TURN_TOKEN || "";
 
 const app = express();
 app.use(express.static("public"));
@@ -12,9 +16,9 @@ app.use(express.json()); // ADD THIS for JSON body parsing
 // Endpoint do pobrania konfiguracji Cloudflare
 app.get("/config", (_req, res) => {
   res.json({
-    appId: CF_APP_ID,
-    token: CF_TOKEN ? "use-from-env" : "",
-    hasToken: !!CF_TOKEN,
+    appId: CF_REALTIME_APP_ID,
+    token: CF_REALTIME_TOKEN ? "use-from-env" : "",
+    hasToken: !!CF_REALTIME_TOKEN,
   });
 });
 
@@ -23,7 +27,7 @@ app.get("/health", (_req, res) => {
   res.json({ 
     status: "ok", 
     mode: "cloudflare-sfu",
-    cfConfigured: !!(CF_APP_ID && CF_TOKEN)
+    cfConfigured: !!(CF_REALTIME_APP_ID && CF_REALTIME_TOKEN)
   });
 });
 
@@ -35,7 +39,7 @@ app.post("/api/join-session", async (req, res) => {
     return res.status(400).json({ error: "Missing sessionId or offer" });
   }
   
-  if (!CF_APP_ID || !CF_TOKEN) {
+  if (!CF_REALTIME_APP_ID || !CF_REALTIME_TOKEN) {
     return res.status(500).json({ error: "Server not configured with Cloudflare credentials" });
   }
   
@@ -44,7 +48,7 @@ app.post("/api/join-session", async (req, res) => {
     
     // Create new pull track on existing session
     // Pull the "car-video" track from the car's session
-    const url = `https://rtc.live.cloudflare.com/v1/apps/${CF_APP_ID}/sessions/${sessionId}/tracks/new`;
+    const url = `https://rtc.live.cloudflare.com/v1/apps/${CF_REALTIME_APP_ID}/sessions/${sessionId}/tracks/new`;
     
     const payload = {
       sessionDescription: offer,
@@ -61,7 +65,7 @@ app.post("/api/join-session", async (req, res) => {
     const response = await fetch(url, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${CF_TOKEN}`,
+        'Authorization': `Bearer ${CF_REALTIME_TOKEN}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify(payload)
@@ -95,6 +99,45 @@ app.post("/api/join-session", async (req, res) => {
   }
 });
 
+// Endpoint do generowania Cloudflare TURN credentials
+app.get("/api/turn-credentials", async (_req, res) => {
+  if (!CF_TURN_KEY_ID || !CF_TURN_TOKEN) {
+    return res.status(500).json({ error: "Server not configured with Cloudflare TURN credentials" });
+  }
+  
+  try {
+    const fetch = (await import('node-fetch')).default;
+    
+    // Generate TURN credentials (valid for 24h)
+    const url = `https://rtc.live.cloudflare.com/v1/turn/keys/${CF_TURN_KEY_ID}/credentials/generate-ice-servers`;
+    
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${CF_TURN_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ ttl: 86400 }) // 24 hours
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('[TURN] Error generating credentials:', errorText);
+      return res.status(response.status).json({ error: errorText });
+    }
+    
+    const data = await response.json();
+    console.log('[TURN] Generated credentials for key:', CF_TURN_KEY_ID);
+    console.log('[TURN] URLs:', data.iceServers[0].urls);
+    
+    res.json(data);
+    
+  } catch (error) {
+    console.error('[TURN] Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 const server = http.createServer(app);
 
 // WebSocket signaling is no longer needed - Cloudflare handles all WebRTC signaling
@@ -106,10 +149,17 @@ server.listen(8080, "127.0.0.1", () => {
   console.log("[SERVER] Mode: Cloudflare Realtime SFU");
   console.log("[SERVER] No WebSocket signaling needed - using Cloudflare API");
   
-  if (!CF_APP_ID || !CF_TOKEN) {
+  if (!CF_REALTIME_APP_ID || !CF_REALTIME_TOKEN) {
     console.warn("[SERVER] WARNING: CF_REALTIME_APP_ID or CF_REALTIME_TOKEN not set!");
     console.warn("[SERVER] Set environment variables for Cloudflare integration");
   } else {
-    console.log("[SERVER] Cloudflare credentials configured");
+    console.log("[SERVER] Cloudflare Realtime credentials configured");
+  }
+  
+  if (!CF_TURN_KEY_ID || !CF_TURN_TOKEN) {
+    console.warn("[SERVER] WARNING: CF_TURN_KEY_ID or CF_TURN_TOKEN not set!");
+    console.warn("[SERVER] TURN relay will not be available");
+  } else {
+    console.log("[SERVER] Cloudflare TURN credentials configured");
   }
 });

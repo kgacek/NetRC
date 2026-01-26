@@ -27,6 +27,9 @@ CF_REALTIME_APP_ID = os.environ.get("CF_REALTIME_APP_ID", "")
 CF_REALTIME_TOKEN = os.environ.get("CF_REALTIME_TOKEN", "")
 CF_REALTIME_API = "https://rtc.live.cloudflare.com/v1/apps"
 
+# Backend URL for TURN credentials
+BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8080")
+
 UART_DEV = "/dev/serial0"
 UART_BAUD = 115200
 
@@ -153,15 +156,16 @@ def start_glib_mainloop():
     glib_loop = GLib.MainLoop()
     glib_loop.run()
 
-def make_pipeline(rfd: int) -> tuple[Gst.Pipeline, Any]:
+def make_pipeline(rfd: int, turn_server: Optional[dict] = None) -> tuple[Gst.Pipeline, Any]:
     """Create H264 video pipeline with WebRTC sink."""
-    # Simple pipeline for Cloudflare SFU
+    # Pipeline with Cloudflare STUN/TURN
     desc = (
         f"fdsrc fd={rfd} ! queue ! h264parse ! "
         f"rtph264pay pt=96 config-interval=1 ! "
         f"application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000 ! "
         f"queue ! wb. "
         f"webrtcbin name=wb bundle-policy=max-bundle "
+        f"stun-server=stun://stun.cloudflare.com:3478 "
     )
 
     try:
@@ -174,6 +178,45 @@ def make_pipeline(rfd: int) -> tuple[Gst.Pipeline, Any]:
     wb = p.get_by_name("wb")
     if not wb:
         raise RuntimeError("Cannot find webrtcbin element 'wb'")
+    
+    # Add TURN server if we have credentials
+    if turn_server:
+        username = turn_server.get("username", "")
+        credential = turn_server.get("credential", "")
+        urls = turn_server.get("urls", [])
+        
+        # Find TURN URL (prefer UDP)
+        turn_url = None
+        for url in urls:
+            if url.startswith("turn:") and "udp" in url:
+                turn_url = url
+                break
+        
+        if not turn_url:
+            # Fallback to any TURN URL
+            for url in urls:
+                if url.startswith("turn:"):
+                    turn_url = url
+                    break
+        
+        if turn_url and username and credential:
+            # Format: turn://username:credential@host:port
+            # Parse URL to inject credentials
+            import re
+            match = re.match(r'turn://([^:]+):(\d+)', turn_url)
+            if match:
+                host = match.group(1)
+                port = match.group(2)
+                turn_uri = f"turn://{username}:{credential}@{host}:{port}"
+                
+                wb.set_property("turn-server", turn_uri)
+                log(f"[TURN] ✓ Set TURN server: turn://{username[:10]}...@{host}:{port}")
+            else:
+                log(f"[TURN] ⚠ Could not parse TURN URL: {turn_url}")
+        else:
+            log("[TURN] ⚠ Missing TURN credentials, using STUN only")
+    else:
+        log("[TURN] No TURN credentials provided, using STUN only")
 
     return p, wb
 
@@ -253,6 +296,12 @@ def set_remote_description(sdp_text: str):
 
     log(f"[SDP] Setting remote answer, length: {len(sdp_text)}")
     
+    # Sprawdź czy SDP zawiera relay candidates (TURN)
+    if "typ relay" in sdp_text or "relay" in sdp_text.lower():
+        log("[SDP] ✓ Answer contains TURN relay candidates")
+    else:
+        log("[SDP] ⚠ No TURN relay in answer - connection may fail through NAT")
+    
     res, sdpmsg = GstSdp.SDPMessage.new()
     if res != GstSdp.SDPResult.OK:
         raise RuntimeError(f"SDPMessage.new() failed: {res}")
@@ -314,51 +363,48 @@ async def send_offer_to_cloudflare(offer_sdp: str):
             "Content-Type": "application/json"
         }
         
-        # IMPORTANT: Car is PUSHING video, so location=local
+        # IMPORTANT: NIE wysyłaj tracks w /sessions/new - to powoduje problem!
+        # Cloudflare automatycznie wykrywa tracki z SDP
         payload = {
             "sessionDescription": {
                 "type": "offer",
                 "sdp": offer_sdp
-            },
-            "tracks": [{
-                "location": "local",  # Car is publishing (local to car)
-                "trackName": "car-video",
-                "mid": "0"  # Must match the m= line index in SDP
-            }]
+            }
+            # Usuń tracks - Cloudflare sam je wykryje z SDP
         }
         
-        log(f"[CF] Creating session with track 'car-video'...")
+        log(f"[CF] Creating session (auto-detect tracks from SDP)...")
         log(f"[CF] App ID: {CF_REALTIME_APP_ID}")
         
         response = requests.post(url, json=payload, headers=headers, timeout=10)
         
         response_text = response.text
         log(f"[CF] Response status: {response.status_code}")
-        log(f"[CF] Response body: {response_text[:500]}")
+        log(f"[CF] Response body (first 500 chars): {response_text[:500]}")
         
         if response.status_code == 201:
             data = response.json()
             session_id = data.get("sessionId")
             answer_sdp = data.get("sessionDescription", {}).get("sdp")
             
-            # Check tracks response
+            # Cloudflare powinno zwrócić tracki automatycznie wykryte
             tracks = data.get("tracks", [])
-            log(f"[CF] Tracks in response: {len(tracks)}")
+            log(f"[CF] Auto-detected tracks: {len(tracks)}")
             
             if tracks:
-                track = tracks[0]
-                track_id = track.get("trackName")
-                
-                # Check for track errors
-                if track.get("errorCode"):
-                    log(f"[CF] ✗ Track error: {track.get('errorCode')}")
-                    log(f"[CF] ✗ Description: {track.get('errorDescription')}")
-                    log(f"[CF] Full track response: {track}")
-                    return
-                
-                log(f"[CF] Track successfully registered: {track_id}")
+                for idx, track in enumerate(tracks):
+                    track_name = track.get("trackName")
+                    mid = track.get("mid")
+                    log(f"[CF] Track {idx}: name={track_name}, mid={mid}")
+                    
+                    if track.get("errorCode"):
+                        log(f"[CF] ✗ Track error: {track.get('errorDescription')}")
+                    else:
+                        if not track_id:  # Użyj pierwszego poprawnego tracka
+                            track_id = track_name
+                            log(f"[CF] ✓ Using track: {track_id}")
             else:
-                log(f"[CF] ⚠ No tracks in response!")
+                log(f"[CF] ⚠ No tracks detected - this may cause pull failures")
             
             log(f"[CF] ═══════════════════════════════════════")
             log(f"[CF] ✓ Session created!")
@@ -370,6 +416,8 @@ async def send_offer_to_cloudflare(offer_sdp: str):
             log(f"[CF] Waiting for browser to connect...")
             
             if answer_sdp:
+                # Loguj fragment answer SDP dla debugowania
+                log(f"[CF] Answer SDP (ice-lite): {'ice-lite' in answer_sdp}")
                 set_remote_description(answer_sdp)
             else:
                 log("[CF] No answer SDP received")
@@ -430,6 +478,34 @@ def start_rpicam() -> int:
     assert rpicam_proc.stdout is not None
     return rpicam_proc.stdout.fileno()
 
+async def get_turn_credentials():
+    """Fetch TURN credentials from backend."""
+    try:
+        url = f"{BACKEND_URL}/api/turn-credentials"
+        response = requests.get(url, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            ice_servers = data.get("iceServers", [])
+            
+            if ice_servers:
+                server = ice_servers[0]
+                log(f"[TURN] Got credentials:")
+                log(f"[TURN]   URLs: {server.get('urls', [])}")
+                log(f"[TURN]   Username: {server.get('username', '')[:20]}...")
+                return server
+            else:
+                log("[TURN] No ICE servers in response")
+                return None
+        else:
+            log(f"[TURN] Error: HTTP {response.status_code}")
+            log(f"[TURN] Response: {response.text[:200]}")
+            return None
+            
+    except Exception as e:
+        log(f"[TURN] Failed to fetch credentials: {e}")
+        return None
+
 async def cloudflare_sfu_loop():
     """Main loop for Cloudflare Realtime SFU."""
     global pipe, webrtc, asyncio_loop
@@ -451,6 +527,10 @@ async def cloudflare_sfu_loop():
 
     log(f"[CF] Starting with App ID: {CF_REALTIME_APP_ID}")
     
+    # Get TURN credentials from backend
+    log("[TURN] Fetching credentials from backend...")
+    turn_server = await get_turn_credentials()
+    
     # GLib mainloop in background
     t = threading.Thread(target=start_glib_mainloop, daemon=True)
     t.start()
@@ -460,8 +540,8 @@ async def cloudflare_sfu_loop():
         cam_fd = start_rpicam()
         log("[CAM] rpicam-vid started, fd:", cam_fd)
         
-        # Create pipeline
-        pipe, webrtc = make_pipeline(cam_fd)
+        # Create pipeline WITH TURN credentials
+        pipe, webrtc = make_pipeline(cam_fd, turn_server)
         
         # Setup bus
         bus = pipe.get_bus()
