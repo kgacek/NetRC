@@ -306,18 +306,20 @@ async def send_offer_to_cloudflare(offer_sdp: str):
             "Content-Type": "application/json"
         }
         
+        # IMPORTANT: Car is PUSHING video, so location=local
         payload = {
             "sessionDescription": {
                 "type": "offer",
                 "sdp": offer_sdp
             },
             "tracks": [{
-                "location": "local",
-                "trackName": "car-video"  # Named track that browser can pull
+                "location": "local",  # Car is publishing (local to car)
+                "trackName": "car-video",
+                "mid": "0"  # Must match the m= line index in SDP
             }]
         }
         
-        log(f"[CF] Creating session...")
+        log(f"[CF] Creating session with track 'car-video'...")
         log(f"[CF] App ID: {CF_REALTIME_APP_ID}")
         
         response = requests.post(url, json=payload, headers=headers, timeout=10)
@@ -327,10 +329,15 @@ async def send_offer_to_cloudflare(offer_sdp: str):
             session_id = data.get("sessionId")
             answer_sdp = data.get("sessionDescription", {}).get("sdp")
             
-            # Extract track info
+            # Check for track errors
             tracks = data.get("tracks", [])
             if tracks:
-                track_id = tracks[0].get("trackName")
+                track = tracks[0]
+                track_id = track.get("trackName")
+                
+                if track.get("errorCode"):
+                    log(f"[CF] ✗ Track error: {track.get('errorDescription')}")
+                    return
             
             log(f"[CF] ═══════════════════════════════════════")
             log(f"[CF] ✓ Session created!")
@@ -339,6 +346,7 @@ async def send_offer_to_cloudflare(offer_sdp: str):
                 log(f"[CF] TRACK NAME: {track_id}")
             log(f"[CF] ═══════════════════════════════════════")
             log(f"[CF] Copy Session ID to your browser!")
+            log(f"[CF] Waiting for browser to connect...")
             
             if answer_sdp:
                 set_remote_description(answer_sdp)
