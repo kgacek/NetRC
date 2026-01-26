@@ -1,86 +1,252 @@
 <!DOCTYPE html>
 <html lang="pl">
 <head>
-	<meta charset="UTF-8" />
-	<title>CF Realtime Viewer</title>
-	<style>
-		body { font-family: sans-serif; margin: 1rem; }
-		label { display: block; margin: 0.5rem 0 0.2rem; }
-		input { width: 100%; padding: 0.4rem; }
-		button { margin-top: 0.8rem; padding: 0.5rem 1rem; }
-		video { width: 100%; max-width: 960px; margin-top: 1rem; background: #000; }
-	</style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RPi Car Camera Viewer</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: Arial, sans-serif;
+            background: #1a1a1a;
+            color: #fff;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        h1 {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .controls {
+            margin-bottom: 20px;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        input, button {
+            padding: 10px;
+            font-size: 16px;
+        }
+        input {
+            flex: 1;
+            border: 1px solid #444;
+            background: #2a2a2a;
+            color: #fff;
+            border-radius: 4px;
+        }
+        button {
+            background: #0070f3;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            min-width: 120px;
+        }
+        button:hover {
+            background: #0051cc;
+        }
+        button:disabled {
+            background: #444;
+            cursor: not-allowed;
+        }
+        .video-container {
+            position: relative;
+            width: 100%;
+            max-width: 1024px;
+            margin: 0 auto;
+            background: #000;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        video {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+        .status {
+            margin-top: 20px;
+            padding: 15px;
+            background: #2a2a2a;
+            border-radius: 4px;
+            border-left: 4px solid #0070f3;
+        }
+        .status.error {
+            border-left-color: #ff0000;
+        }
+        .status.success {
+            border-left-color: #00ff00;
+        }
+    </style>
 </head>
 <body>
-	<h1>Cloudflare Realtime (SFU) – podgląd</h1>
-	<label>Signaling URL (wss://... z realtime-examples)</label>
-	<input id="wsUrl" placeholder="wss://your-worker.example.workers.dev/realtime" />
-	<label>Bearer token (np. z Worker lub secrets)</label>
-	<input id="token" placeholder="cf_realtime_token" />
-	<label>Room</label>
-	<input id="room" value="car-stream" />
-	<button id="connect">Połącz</button>
-	<video id="remoteVideo" playsinline autoplay muted></video>
-	<pre id="log"></pre>
+    <div class="container">
+        <h1>🚗 RPi Car Camera Stream</h1>
+        
+        <div class="controls">
+            <input type="text" id="appId" placeholder="Cloudflare App ID" />
+            <input type="text" id="appSecret" placeholder="Cloudflare App Secret" />
+            <input type="text" id="sessionId" placeholder="Session ID (from RPi)" />
+            <button id="connectBtn" onclick="connect()">Connect</button>
+            <button id="disconnectBtn" onclick="disconnect()" disabled>Disconnect</button>
+        </div>
 
-	<script>
-		const log = (msg) => {
-			const el = document.getElementById('log');
-			el.textContent += `${new Date().toISOString()} ${msg}\n`;
-		};
+        <div class="video-container">
+            <video id="remoteVideo" autoplay playsinline muted></video>
+        </div>
 
-		document.getElementById('connect').onclick = async () => {
-			const wsUrl = document.getElementById('wsUrl').value.trim();
-			const token = document.getElementById('token').value.trim();
-			const room = document.getElementById('room').value.trim();
-			if (!wsUrl || !token || !room) {
-				log('Uzupełnij wsUrl/token/room');
-				return;
-			}
+        <div id="status" class="status">
+            Waiting to connect...
+        </div>
+    </div>
 
-			const pc = new RTCPeerConnection({
-				iceServers: [{ urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.l.google.com:19302'] }]
-			});
+    <script>
+        let peerConnection = null;
+        let sessionIdValue = null;
 
-			pc.ontrack = (ev) => {
-				if (ev.streams && ev.streams[0]) {
-					document.getElementById('remoteVideo').srcObject = ev.streams[0];
-					log('Track otrzymany');
-				}
-			};
+        function updateStatus(message, type = 'info') {
+            const statusEl = document.getElementById('status');
+            statusEl.textContent = message;
+            statusEl.className = 'status ' + type;
+            console.log(message);
+        }
 
-			pc.onicecandidate = async (ev) => {
-				if (ev.candidate) return; // trickle disabled; send once complete
-				await sendOffer();
-			};
+        async function connect() {
+            const appId = document.getElementById('appId').value.trim();
+            const appSecret = document.getElementById('appSecret').value.trim();
+            sessionIdValue = document.getElementById('sessionId').value.trim();
 
-			const ws = new WebSocket(wsUrl, []);
-			ws.onopen = () => {
-				ws.send(JSON.stringify({ type: 'join', room, token }));
-				log('WS connected');
-			};
-			ws.onmessage = async (ev) => {
-				const msg = JSON.parse(ev.data);
-				if (msg.type === 'answer') {
-					await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: msg.sdp }));
-					log('Remote answer ustawiony');
-				} else if (msg.type === 'candidate') {
-					if (msg.candidate) {
-						try { await pc.addIceCandidate(msg.candidate); } catch (e) { log(e.toString()); }
-					}
-				} else {
-					log(`Msg: ${ev.data}`);
-				}
-			};
-			ws.onerror = (err) => log(`WS error: ${err.message || err}`);
+            if (!appId || !appSecret || !sessionIdValue) {
+                updateStatus('Please fill in all fields', 'error');
+                return;
+            }
 
-			const sendOffer = async () => {
-				const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
-				await pc.setLocalDescription(offer);
-				ws.send(JSON.stringify({ type: 'offer', room, token, sdp: offer.sdp }));
-				log('Offer wysłany');
-			};
-		};
-	</script>
+            try {
+                document.getElementById('connectBtn').disabled = true;
+                updateStatus('Connecting to Cloudflare Calls...');
+
+                // Create peer connection
+                peerConnection = new RTCPeerConnection({
+                    iceServers: [
+                        { urls: 'stun:stun.cloudflare.com:3478' }
+                    ],
+                    bundlePolicy: 'max-bundle'
+                });
+
+                // Handle incoming tracks
+                peerConnection.ontrack = (event) => {
+                    updateStatus('Receiving video stream...', 'success');
+                    const video = document.getElementById('remoteVideo');
+                    if (event.streams && event.streams[0]) {
+                        video.srcObject = event.streams[0];
+                    }
+                };
+
+                // Handle connection state
+                peerConnection.onconnectionstatechange = () => {
+                    updateStatus(`Connection state: ${peerConnection.connectionState}`);
+                    if (peerConnection.connectionState === 'connected') {
+                        updateStatus('Connected! Streaming video...', 'success');
+                        document.getElementById('disconnectBtn').disabled = false;
+                    } else if (peerConnection.connectionState === 'failed' || 
+                               peerConnection.connectionState === 'disconnected') {
+                        updateStatus('Connection lost', 'error');
+                        disconnect();
+                    }
+                };
+
+                // Handle ICE candidates
+                const iceCandidates = [];
+                peerConnection.onicecandidate = (event) => {
+                    if (event.candidate) {
+                        iceCandidates.push(event.candidate);
+                    }
+                };
+
+                // Add transceiver to receive video
+                peerConnection.addTransceiver('video', { direction: 'recvonly' });
+
+                // Create offer
+                const offer = await peerConnection.createOffer();
+                await peerConnection.setLocalDescription(offer);
+
+                // Wait for ICE gathering
+                await new Promise((resolve) => {
+                    if (peerConnection.iceGatheringState === 'complete') {
+                        resolve();
+                    } else {
+                        peerConnection.addEventListener('icegatheringstatechange', () => {
+                            if (peerConnection.iceGatheringState === 'complete') {
+                                resolve();
+                            }
+                        });
+                    }
+                });
+
+                // Send offer to Cloudflare
+                const response = await fetch(`https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${sessionIdValue}/tracks/new`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${appSecret}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        sessionDescription: {
+                            type: 'offer',
+                            sdp: peerConnection.localDescription.sdp
+                        },
+                        tracks: [
+                            {
+                                location: 'remote',
+                                trackName: 'camera'
+                            }
+                        ]
+                    })
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const data = await response.json();
+
+                // Set remote description
+                await peerConnection.setRemoteDescription({
+                    type: 'answer',
+                    sdp: data.sessionDescription.sdp
+                });
+
+                updateStatus('Waiting for video stream...', 'success');
+
+            } catch (error) {
+                updateStatus(`Error: ${error.message}`, 'error');
+                console.error('Connection error:', error);
+                document.getElementById('connectBtn').disabled = false;
+                if (peerConnection) {
+                    peerConnection.close();
+                    peerConnection = null;
+                }
+            }
+        }
+
+        function disconnect() {
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+            }
+            
+            const video = document.getElementById('remoteVideo');
+            video.srcObject = null;
+
+            document.getElementById('connectBtn').disabled = false;
+            document.getElementById('disconnectBtn').disabled = true;
+            updateStatus('Disconnected');
+        }
+
+        // Clean up on page unload
+        window.addEventListener('beforeunload', disconnect);
+    </script>
 </body>
 </html>
