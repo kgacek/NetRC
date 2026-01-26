@@ -187,6 +187,14 @@ def on_bus_message(bus: Gst.Bus, message: Gst.Message):
         log("[GST] WARN:", err, dbg)
     elif t == Gst.MessageType.EOS:
         log("[GST] EOS")
+    elif t == Gst.MessageType.QOS:
+        # Log quality of service messages
+        qos = message.parse_qos()
+        log(f"[GST] QOS: {qos}")
+    elif t == Gst.MessageType.STREAM_STATUS:
+        # Log when stream starts/stops
+        status = message.parse_stream_status()
+        log(f"[GST] Stream status: {status}")
     return True
 
 def on_ice_candidate(wb, mlineindex, candidate):
@@ -324,20 +332,33 @@ async def send_offer_to_cloudflare(offer_sdp: str):
         
         response = requests.post(url, json=payload, headers=headers, timeout=10)
         
+        response_text = response.text
+        log(f"[CF] Response status: {response.status_code}")
+        log(f"[CF] Response body: {response_text[:500]}")
+        
         if response.status_code == 201:
             data = response.json()
             session_id = data.get("sessionId")
             answer_sdp = data.get("sessionDescription", {}).get("sdp")
             
-            # Check for track errors
+            # Check tracks response
             tracks = data.get("tracks", [])
+            log(f"[CF] Tracks in response: {len(tracks)}")
+            
             if tracks:
                 track = tracks[0]
                 track_id = track.get("trackName")
                 
+                # Check for track errors
                 if track.get("errorCode"):
-                    log(f"[CF] ✗ Track error: {track.get('errorDescription')}")
+                    log(f"[CF] ✗ Track error: {track.get('errorCode')}")
+                    log(f"[CF] ✗ Description: {track.get('errorDescription')}")
+                    log(f"[CF] Full track response: {track}")
                     return
+                
+                log(f"[CF] Track successfully registered: {track_id}")
+            else:
+                log(f"[CF] ⚠ No tracks in response!")
             
             log(f"[CF] ═══════════════════════════════════════")
             log(f"[CF] ✓ Session created!")
@@ -354,7 +375,7 @@ async def send_offer_to_cloudflare(offer_sdp: str):
                 log("[CF] No answer SDP received")
         else:
             log(f"[CF] ✗ Error: HTTP {response.status_code}")
-            log(f"[CF] Response: {response.text}")
+            log(f"[CF] Response: {response_text}")
             
     except Exception as e:
         log(f"[CF] ✗ Request error: {e}")
@@ -429,7 +450,7 @@ async def cloudflare_sfu_loop():
         log("[CF] ═══════════════════════════════════════")
         return
 
-    log("[CF] Starting with App ID: {CF_REALTIME_APP_ID}")
+    log(f"[CF] Starting with App ID: {CF_REALTIME_APP_ID}")
     
     # GLib mainloop in background
     t = threading.Thread(target=start_glib_mainloop, daemon=True)
