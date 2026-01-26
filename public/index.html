@@ -102,8 +102,8 @@
         <input type="text" id="sessionId" placeholder="paste-session-id-here">
       </div>
       <p style="color: #888; font-size: 12px;">
-        The car will print the Session ID when it starts.<br>
-        Copy it from the car's terminal and paste here.
+        The car creates a Cloudflare session. Paste the Session ID here.<br>
+        Note: You'll need to add new tracks using the Cloudflare API with auth.
       </p>
       <button id="connectBtn">Connect to Stream</button>
     </div>
@@ -213,15 +213,16 @@
           }
         };
 
-        // Handle ICE candidates - send to Cloudflare
+        // Handle ICE candidates
         pc.onicecandidate = async (event) => {
           if (event.candidate) {
-            log('ICE candidate generated');
-            await sendIceCandidate(event.candidate);
+            log('ICE candidate generated: ' + event.candidate.candidate.substring(0, 50));
+          } else {
+            log('ICE gathering complete');
           }
         };
 
-        // Monitor ICE connection
+        // Monitor states
         pc.oniceconnectionstatechange = () => {
           log('ICE connection state: ' + pc.iceConnectionState);
           updateStatus(iceStatus, pc.iceConnectionState, 
@@ -254,7 +255,6 @@
 
           dataChannel.onerror = (error) => {
             log('Data channel error: ' + error);
-            updateStatus(dcStatus, 'Error', 'disconnected');
           };
 
           dataChannel.onmessage = (event) => {
@@ -265,39 +265,40 @@
         // Add transceiver for receiving video
         pc.addTransceiver('video', { direction: 'recvonly' });
 
-        // Create offer
+        // Create offer for pulling from session
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
 
-        // Join existing session (renegotiate)
-        log('Joining session...');
-        const answer = await joinSession(offer);
+        log('Created offer, requesting new track from session...');
+        
+        // Request to pull track from existing session
+        // This creates a NEW pull track on the session
+        const answer = await createNewPullTrack(offer);
         
         if (answer) {
           await pc.setRemoteDescription(new RTCSessionDescription(answer));
-          log('Successfully joined session');
-          updateStatus(connStatus, 'Waiting for video...', 'warning');
+          log('Successfully connected to track');
+          updateStatus(connStatus, 'Connected - waiting for video...', 'connected');
         }
 
       } catch (error) {
         log('Error: ' + error);
+        alert('Connection failed: ' + error.message + '\n\nNote: Browser needs server-side auth to join. Consider using WebSocket signaling instead.');
         updateStatus(connStatus, 'Error: ' + error.message, 'disconnected');
       }
     }
 
-    async function joinSession(offer) {
-      // Browser joins the session created by the car
-      // No authentication token needed - session is publicly joinable
-      const url = `https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${sessionId}/renegotiate`;
-      
+    async function createNewPullTrack(offer) {
+      // Use backend proxy to join session (backend has auth token)
       try {
-        const response = await fetch(url, {
-          method: 'PUT',
+        const response = await fetch('/api/join-session', {
+          method: 'POST',
           headers: {
             'Content-Type': 'application/json'
           },
           body: JSON.stringify({
-            sessionDescription: {
+            sessionId: sessionId,
+            offer: {
               type: offer.type,
               sdp: offer.sdp
             }
@@ -305,48 +306,17 @@
         });
 
         if (!response.ok) {
-          const errorText = await response.text();
-          throw new Error(`HTTP ${response.status}: ${errorText}`);
+          const errorData = await response.json();
+          throw new Error(`Server error: ${errorData.error}`);
         }
 
         const data = await response.json();
-        log('Got answer from Cloudflare');
+        log('Got answer from server proxy');
         
-        return {
-          type: data.sessionDescription.type,
-          sdp: data.sessionDescription.sdp
-        };
+        return data.answer;
       } catch (error) {
-        log('Error joining session: ' + error);
+        log('Error via proxy: ' + error);
         throw error;
-      }
-    }
-
-    async function sendIceCandidate(candidate) {
-      if (!appId || !sessionId) return;
-
-      // Note: This endpoint might not work for browser clients
-      // Cloudflare may handle ICE candidates automatically via /renegotiate
-      const url = `https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${sessionId}/tracks/new`;
-      
-      try {
-        await fetch(url, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            iceCandidate: {
-              candidate: candidate.candidate,
-              sdpMLineIndex: candidate.sdpMLineIndex,
-              sdpMid: candidate.sdpMid
-            }
-          })
-        });
-        log('ICE candidate sent');
-      } catch (error) {
-        // Silently fail - ICE candidates may be handled automatically
-        log('ICE candidate send failed (may be ok): ' + error);
       }
     }
 

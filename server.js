@@ -7,6 +7,7 @@ const CF_TOKEN = process.env.CF_REALTIME_TOKEN || "";
 
 const app = express();
 app.use(express.static("public"));
+app.use(express.json()); // ADD THIS for JSON body parsing
 
 // Endpoint do pobrania konfiguracji Cloudflare
 app.get("/config", (_req, res) => {
@@ -24,6 +25,56 @@ app.get("/health", (_req, res) => {
     mode: "cloudflare-sfu",
     cfConfigured: !!(CF_APP_ID && CF_TOKEN)
   });
+});
+
+// Proxy endpoint for browser to join session
+app.post("/api/join-session", async (req, res) => {
+  const { sessionId, offer } = req.body;
+  
+  if (!sessionId || !offer) {
+    return res.status(400).json({ error: "Missing sessionId or offer" });
+  }
+  
+  if (!CF_APP_ID || !CF_TOKEN) {
+    return res.status(500).json({ error: "Server not configured with Cloudflare credentials" });
+  }
+  
+  try {
+    const fetch = (await import('node-fetch')).default;
+    
+    // Create new pull track on existing session
+    const url = `https://rtc.live.cloudflare.com/v1/apps/${CF_APP_ID}/sessions/${sessionId}/tracks/new`;
+    
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${CF_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        sessionDescription: offer,
+        tracks: [{
+          location: 'remote',
+          trackName: `browser-${Date.now()}`
+        }]
+      })
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('[PROXY] Cloudflare error:', errorText);
+      return res.status(response.status).json({ error: errorText });
+    }
+    
+    const data = await response.json();
+    console.log('[PROXY] Successfully created pull track for browser');
+    
+    res.json({ answer: data.sessionDescription });
+    
+  } catch (error) {
+    console.error('[PROXY] Error:', error);
+    res.status(500).json({ error: error.message });
+  }
 });
 
 const server = http.createServer(app);
