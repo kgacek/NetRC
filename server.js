@@ -43,7 +43,21 @@ app.post("/api/join-session", async (req, res) => {
     const fetch = (await import('node-fetch')).default;
     
     // Create new pull track on existing session
+    // The browser wants to PULL video from the car's session
     const url = `https://rtc.live.cloudflare.com/v1/apps/${CF_APP_ID}/sessions/${sessionId}/tracks/new`;
+    
+    const payload = {
+      sessionDescription: offer,
+      tracks: [{
+        location: 'remote',
+        trackName: `browser-pull-${Date.now()}`,
+        sessionId: sessionId  // IMPORTANT: Must specify which session to pull from
+      }]
+    };
+    
+    console.log('[PROXY] Creating pull track...');
+    console.log('[PROXY] Session ID:', sessionId);
+    console.log('[PROXY] Payload:', JSON.stringify(payload, null, 2));
     
     const response = await fetch(url, {
       method: 'POST',
@@ -51,22 +65,19 @@ app.post("/api/join-session", async (req, res) => {
         'Authorization': `Bearer ${CF_TOKEN}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({
-        sessionDescription: offer,
-        tracks: [{
-          location: 'remote',
-          trackName: `browser-${Date.now()}`
-        }]
-      })
+      body: JSON.stringify(payload)
     });
     
+    const responseText = await response.text();
+    console.log('[PROXY] Cloudflare response status:', response.status);
+    console.log('[PROXY] Cloudflare response:', responseText);
+    
     if (!response.ok) {
-      const errorText = await response.text();
-      console.error('[PROXY] Cloudflare error:', errorText);
-      return res.status(response.status).json({ error: errorText });
+      console.error('[PROXY] Cloudflare error:', responseText);
+      return res.status(response.status).json({ error: responseText });
     }
     
-    const data = await response.json();
+    const data = JSON.parse(responseText);
     console.log('[PROXY] Successfully created pull track for browser');
     
     res.json({ answer: data.sessionDescription });
