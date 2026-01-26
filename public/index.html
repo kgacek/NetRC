@@ -113,6 +113,24 @@
             console.log(message);
         }
 
+        function extractMidFromSDP(sdp, trackKind) {
+            const lines = sdp.split('\n');
+            let currentMid = null;
+            let currentKind = null;
+            
+            for (const line of lines) {
+                if (line.startsWith('a=mid:')) {
+                    currentMid = line.split(':')[1].trim();
+                } else if (line.startsWith('m=')) {
+                    currentKind = line.split(' ')[0].substring(2);
+                    if (currentKind === trackKind && currentMid) {
+                        return currentMid;
+                    }
+                }
+            }
+            return currentMid;
+        }
+
         async function connect() {
             const appId = document.getElementById('appId').value.trim();
             const appSecret = document.getElementById('appSecret').value.trim();
@@ -138,6 +156,7 @@
                 // Handle incoming tracks
                 peerConnection.ontrack = (event) => {
                     updateStatus('Receiving video stream...', 'success');
+                    console.log('Track received:', event.track.kind);
                     const video = document.getElementById('remoteVideo');
                     if (event.streams && event.streams[0]) {
                         video.srcObject = event.streams[0];
@@ -157,16 +176,10 @@
                     }
                 };
 
-                // Handle ICE candidates
-                const iceCandidates = [];
-                peerConnection.onicecandidate = (event) => {
-                    if (event.candidate) {
-                        iceCandidates.push(event.candidate);
-                    }
-                };
-
-                // Add transceiver to receive video
-                peerConnection.addTransceiver('video', { direction: 'recvonly' });
+                // Add transceiver to receive video - use sendrecv instead of recvonly
+                peerConnection.addTransceiver('video', { 
+                    direction: 'sendrecv'
+                });
 
                 // Create offer
                 const offer = await peerConnection.createOffer();
@@ -177,15 +190,25 @@
                     if (peerConnection.iceGatheringState === 'complete') {
                         resolve();
                     } else {
-                        peerConnection.addEventListener('icegatheringstatechange', () => {
+                        const checkState = () => {
                             if (peerConnection.iceGatheringState === 'complete') {
+                                peerConnection.removeEventListener('icegatheringstatechange', checkState);
                                 resolve();
                             }
-                        });
+                        };
+                        peerConnection.addEventListener('icegatheringstatechange', checkState);
                     }
                 });
 
-                // Send offer to Cloudflare
+                // Extract mid from SDP
+                const videoMid = extractMidFromSDP(peerConnection.localDescription.sdp, 'video');
+                console.log('Extracted video mid:', videoMid);
+
+                if (!videoMid) {
+                    throw new Error('Could not extract video mid from SDP');
+                }
+
+                // Send offer to Cloudflare - pull the remote track with sessionId
                 const response = await fetch(`https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${sessionIdValue}/tracks/new`, {
                     method: 'POST',
                     headers: {
@@ -200,23 +223,85 @@
                         tracks: [
                             {
                                 location: 'remote',
-                                trackName: 'camera'
+                                sessionId: sessionIdValue,
+                                trackName: 'camera',
+                                mid: videoMid
                             }
                         ]
                     })
                 });
 
                 if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
+                    const errorText = await response.text();
+                    console.error('Server response:', errorText);
+                    throw new Error(`HTTP error! status: ${response.status} - ${errorText}`);
                 }
 
                 const data = await response.json();
+                console.log('Received answer:', data);
 
-                // Set remote description
-                await peerConnection.setRemoteDescription({
-                    type: 'answer',
-                    sdp: data.sessionDescription.sdp
+                // Check if we need to renegotiate
+                if (data.requiresImmediateRenegotiation) {
+                    updateStatus('Renegotiation required, please try again', 'error');
+                    throw new Error('Immediate renegotiation required');
+                }
+
+                // For pulling tracks, we might need to create a new offer/answer
+                // Let's try to renegotiate to get the remote track
+                updateStatus('Renegotiating to receive track...');
+                
+                // Create a new offer after pulling the track
+                const newOffer = await peerConnection.createOffer();
+                await peerConnection.setLocalDescription(newOffer);
+
+                // Wait for ICE gathering again
+                await new Promise((resolve) => {
+                    if (peerConnection.iceGatheringState === 'complete') {
+                        resolve();
+                    } else {
+                        const checkState = () => {
+                            if (peerConnection.iceGatheringState === 'complete') {
+                                peerConnection.removeEventListener('icegatheringstatechange', checkState);
+                                resolve();
+                            }
+                        };
+                        peerConnection.addEventListener('icegatheringstatechange', checkState);
+                    }
                 });
+
+                // Send renegotiation offer
+                const renegResponse = await fetch(`https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${sessionIdValue}/renegotiate`, {
+                    method: 'PUT',
+                    headers: {
+                        'Authorization': `Bearer ${appSecret}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        sessionDescription: {
+                            type: 'offer',
+                            sdp: peerConnection.localDescription.sdp
+                        }
+                    })
+                });
+
+                if (!renegResponse.ok) {
+                    const errorText = await renegResponse.text();
+                    console.error('Renegotiation response:', errorText);
+                    throw new Error(`Renegotiation failed! status: ${renegResponse.status} - ${errorText}`);
+                }
+
+                const renegData = await renegResponse.json();
+                console.log('Received renegotiation answer:', renegData);
+
+                // Set remote description from renegotiation
+                if (renegData.sessionDescription) {
+                    await peerConnection.setRemoteDescription({
+                        type: renegData.sessionDescription.type,
+                        sdp: renegData.sessionDescription.sdp
+                    });
+                } else {
+                    throw new Error('No session description in renegotiation response');
+                }
 
                 updateStatus('Waiting for video stream...', 'success');
 
