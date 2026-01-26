@@ -197,10 +197,30 @@
 
                 const videoMid = extractMidFromSDP(peerConnection.localDescription.sdp, 'video');
                 console.log('Extracted video mid:', videoMid);
+                console.log('Full SDP:', peerConnection.localDescription.sdp);
 
                 if (!videoMid) {
                     throw new Error('Could not extract video mid from SDP');
                 }
+
+                // Prepare request payload
+                const payload = {
+                    sessionDescription: {
+                        type: 'offer',
+                        sdp: peerConnection.localDescription.sdp
+                    },
+                    tracks: [
+                        {
+                            location: 'remote',
+                            trackName: 'camera',
+                            sessionId: sessionIdValue,
+                            mid: videoMid
+                        }
+                    ]
+                };
+
+                console.log('Request URL:', `https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${sessionIdValue}/tracks/new`);
+                console.log('Request payload:', JSON.stringify(payload, null, 2));
 
                 // Subscribe to the same session - pull remote track
                 updateStatus('Subscribing to camera track...');
@@ -210,38 +230,29 @@
                         'Authorization': `Bearer ${appSecret}`,
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify({
-                        sessionDescription: {
-                            type: 'offer',
-                            sdp: peerConnection.localDescription.sdp
-                        },
-                        tracks: [
-                            {
-                                location: 'remote',
-                                trackName: 'camera',
-                                sessionId: sessionIdValue,
-                                mid: videoMid
-                            }
-                        ]
-                    })
+                    body: JSON.stringify(payload)
                 });
 
+                const responseText = await response.text();
+                console.log('Response status:', response.status);
+                console.log('Response body:', responseText);
+
                 if (!response.ok) {
-                    const errorText = await response.text();
-                    console.error('Server response:', errorText);
-                    throw new Error(`HTTP error! status: ${response.status} - ${errorText}`);
+                    throw new Error(`HTTP error! status: ${response.status} - ${responseText}`);
                 }
 
-                const data = await response.json();
-                console.log('Received response:', data);
+                const data = JSON.parse(responseText);
+                console.log('Parsed response:', data);
 
                 // Check for errors in tracks
                 if (data.tracks && data.tracks[0] && data.tracks[0].errorCode) {
-                    throw new Error(`Track error: ${data.tracks[0].errorDescription}`);
+                    console.error('Track error details:', data.tracks[0]);
+                    throw new Error(`Track error: ${data.tracks[0].errorDescription} (${data.tracks[0].errorCode})`);
                 }
 
                 // Handle renegotiation if required
                 if (data.requiresImmediateRenegotiation) {
+                    console.log('Renegotiation required');
                     updateStatus('Renegotiating connection...');
                     
                     // Create new offer
@@ -263,6 +274,8 @@
                         }
                     });
 
+                    console.log('Renegotiation SDP:', peerConnection.localDescription.sdp);
+
                     // Renegotiate
                     const renegResponse = await fetch(`https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${sessionIdValue}/renegotiate`, {
                         method: 'PUT',
@@ -278,13 +291,16 @@
                         })
                     });
 
+                    const renegText = await renegResponse.text();
+                    console.log('Renegotiation response status:', renegResponse.status);
+                    console.log('Renegotiation response body:', renegText);
+
                     if (!renegResponse.ok) {
-                        const errorText = await renegResponse.text();
-                        throw new Error(`Renegotiation failed: ${renegResponse.status} - ${errorText}`);
+                        throw new Error(`Renegotiation failed: ${renegResponse.status} - ${renegText}`);
                     }
 
-                    const renegData = await renegResponse.json();
-                    console.log('Renegotiation response:', renegData);
+                    const renegData = JSON.parse(renegText);
+                    console.log('Renegotiation parsed response:', renegData);
 
                     if (renegData.sessionDescription) {
                         await peerConnection.setRemoteDescription({
@@ -293,11 +309,14 @@
                         });
                     }
                 } else if (data.sessionDescription) {
+                    console.log('Setting remote description directly');
                     // Set remote description
                     await peerConnection.setRemoteDescription({
                         type: data.sessionDescription.type,
                         sdp: data.sessionDescription.sdp
                     });
+                } else {
+                    console.warn('No sessionDescription in response and no renegotiation required');
                 }
 
                 updateStatus('Waiting for video stream...', 'success');

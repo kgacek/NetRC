@@ -145,19 +145,33 @@ async def send_offer(session_id, offer_sdp):
             {
                 'location': 'local',
                 'trackName': 'camera',
-                'mid': video_mid,
-                'bidirectionalMediaStream': False  # Tylko wysyłanie
+                'mid': video_mid
             }
         ]
     }
     
+    # Log full request for debugging
+    logger.debug(f"Sending to URL: {url}")
+    logger.debug(f"Payload: {json.dumps(payload, indent=2)}")
+    
     async with aiohttp.ClientSession() as session:
         async with session.post(url, headers=headers, json=payload) as response:
-            if response.status not in [200, 201]:
-                text = await response.text()
-                raise Exception(f"Failed to send offer: {response.status} - {text}")
+            response_text = await response.text()
+            logger.info(f"Response status: {response.status}")
+            logger.info(f"Response body: {response_text}")
             
-            data = await response.json()
+            if response.status not in [200, 201]:
+                raise Exception(f"Failed to send offer: {response.status} - {response_text}")
+            
+            data = json.loads(response_text)
+            
+            # Check for track errors
+            if 'tracks' in data:
+                for track in data['tracks']:
+                    if 'errorCode' in track:
+                        logger.error(f"Track error: {track}")
+                        raise Exception(f"Track error: {track.get('errorDescription', 'Unknown error')}")
+            
             return data
 
 
