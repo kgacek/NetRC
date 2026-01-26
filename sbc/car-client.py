@@ -25,6 +25,11 @@ Gst.init(None)
 SIGNALING_URL = "wss://79-76-127-159.nip.io/"   # nginx reverse proxy -> node ws
 ROOM_ID = "test1"
 
+# Cloudflare Realtime WHIP (WebRTC-HTTP Ingestion Protocol)
+CF_WHIP_ENDPOINT = os.environ.get("CF_WHIP_ENDPOINT", "https://rtc.live.cloudflare.com/whip")
+CF_APP_ID = os.environ.get("CF_REALTIME_APP_ID", "")
+CF_TOKEN = os.environ.get("CF_REALTIME_TOKEN", "")
+
 UART_DEV = "/dev/serial0"
 UART_BAUD = 115200
 
@@ -63,6 +68,7 @@ webrtc: Optional[Any] = None
 rpicam_proc: Optional[subprocess.Popen] = None
 asyncio_loop: Optional[asyncio.AbstractEventLoop] = None
 stopping = False
+use_cf_whip = False  # Zmienia się na True jeśli chcemy publikować do Cloudflare WHIP
 
 glib_loop: Optional[GLib.MainLoop] = None
 ice_candidate_queue: list = []  # Queue for ICE candidates before remote description is set
@@ -125,26 +131,34 @@ def make_pipeline(rfd: int) -> tuple[Gst.Pipeline, Any]:
     # Pipeline: fdsrc -> h264parse -> rtph264pay -> application/x-rtp -> webrtcbin
     # Note: "wb." requests dynamic sink pad from webrtcbin
     
-    # Your TURN server configuration
+    # Cloudflare Calls: zazwyczaj nie wymaga własnego TURN. Pozostaw TURN opcjonalny.
+    use_turn = os.environ.get("USE_TURN", "1") not in ("0", "false", "False")
     turn_usr = os.environ.get("TURN_USER", "pocuser")
     turn_pass = os.environ.get("TURN_PASS", "pocpass")
     turn_host = os.environ.get("TURN_HOST", "79-76-127-159.nip.io")
     turn_port = os.environ.get("TURN_PORT", "3478")
-    
-    log(f"[TURN] Using server: turn://{turn_usr}:***@{turn_host}:{turn_port}")
-    
-    # GStreamer webrtcbin requires simple URL without ?transport parameter
-    # The transport is auto-negotiated
-    turn_url = f"turn://{turn_usr}:{turn_pass}@{turn_host}:{turn_port}"
-    
+
+    stun_server = os.environ.get("STUN_SERVER", "")  # np. stun:stun.cloudflare.com:3478
+
+    turn_url = None
+    if use_turn:
+        turn_url = f"turn://{turn_usr}:{turn_pass}@{turn_host}:{turn_port}"
+        log(f"[TURN] Using server: turn://{turn_usr}:***@{turn_host}:{turn_port}")
+    else:
+        log("[TURN] Disabled (USE_TURN=0) - Cloudflare Calls SFU mode")
+
     desc = (
         f"fdsrc fd={rfd} ! queue ! h264parse ! "
         f"rtph264pay pt=96 config-interval=1 ! "
         f"application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000 ! "
         f"queue ! wb. "
         f"webrtcbin name=wb bundle-policy=max-bundle "
-        f"turn-server=\"{turn_url}\" "
     )
+
+    if stun_server:
+        desc += f"stun-server=\"{stun_server}\" "
+    if turn_url:
+        desc += f"turn-server=\"{turn_url}\" "
 
     try:
         p = Gst.parse_launch(desc)
@@ -528,10 +542,108 @@ def start_rpicam() -> int:
     assert rpicam_proc.stdout is not None
     return rpicam_proc.stdout.fileno()
 
+async def cf_whip_loop():
+    """Publikuj strumień H264 do Cloudflare Realtime WHIP endpoint."""
+    import requests
+    
+    # Przygotuj parametry WHIP
+    whip_url = f"{CF_WHIP_ENDPOINT}?video=true&audio=false"
+    
+    try:
+        # Uruchom kamerę i pipeline
+        cam_fd = start_rpicam()
+        log("[CAM] rpicam-vid started, fd:", cam_fd)
+        
+        pipe, webrtc = make_pipeline(cam_fd)
+        
+        bus = pipe.get_bus()
+        bus.add_signal_watch()
+        bus.connect("message", on_bus_message)
+        
+        webrtc.connect("on-ice-candidate", on_ice_candidate)
+        
+        # Start pipeline
+        pipe.set_state(Gst.State.PLAYING)
+        log("[GST] pipeline PLAYING for WHIP")
+        
+        # Utwórz ofertę
+        webrtc.connect("on-offer", lambda wb: _on_offer_cf(wb, whip_url))
+        
+        # Dodaj transceiver
+        webrtc.emit("add-transceiver", GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY, 
+                   Gst.Caps.from_string("application/x-rtp,media=video,encoding-name=H264,payload=96"))
+        
+        create_offer()
+        
+        # Czekaj na ofertę i wyślij do WHIP
+        await asyncio.sleep(2)  # Poczekaj na wygenerowanie oferty
+        
+        log("[CF] Waiting for connection...")
+        while not stopping:
+            await asyncio.sleep(1)
+            
+    except Exception as e:
+        log("[CF] WHIP error:", e)
+    finally:
+        if pipe:
+            pipe.set_state(Gst.State.NULL)
+            log("[GST] Pipeline stopped")
+
+def _on_offer_cf(wb, whip_url):
+    """Handle offer generation dla WHIP."""
+    global webrtc
+    webrtc = wb
+    
+    def _on_offer(wb, promise):
+        reply = promise.get_reply()
+        if reply:
+            offer = reply.get_value("offer")
+            sdp_text = sdp_text_from_desc(offer)
+            log("[SDP] Generated offer for WHIP")
+            
+            # Wyślij ofertę do WHIP (POST request)
+            _send_whip_offer(whip_url, sdp_text)
+    
+    promise = Gst.Promise.new_with_change_func(_on_offer, None, None)
+    wb.emit("create-offer", None, promise)
+
+def _send_whip_offer(whip_url: str, offer_sdp: str):
+    """POST ofertę do Cloudflare WHIP endpoint i odbierz answer."""
+    import requests
+    
+    try:
+        headers = {
+            "Content-Type": "application/sdp",
+            "Authorization": f"Bearer {CF_TOKEN}"
+        }
+        
+        log("[WHIP] Sending offer to", whip_url)
+        response = requests.post(whip_url, data=offer_sdp, headers=headers, timeout=10)
+        
+        if response.status_code == 201:
+            answer_sdp = response.text
+            log("[WHIP] Got answer, status:", response.status_code)
+            
+            # Ustaw remote description
+            set_remote_description("answer", answer_sdp)
+        else:
+            log(f"[WHIP] Error: status {response.status_code}")
+            log("[WHIP] Response:", response.text[:200])
+            
+    except Exception as e:
+        log("[WHIP] Request error:", e)
+
 async def ws_loop():
-    global ws, pipe, webrtc, asyncio_loop, stopping
+    global ws, pipe, webrtc, asyncio_loop, stopping, use_cf_whip
 
     asyncio_loop = asyncio.get_running_loop()
+
+    # Jeśli są ustawione CF credentials, publikuj do WHIP zamiast normalnego WS
+    if CF_APP_ID and CF_TOKEN:
+        use_cf_whip = True
+        log("[CF] WHIP mode enabled - publishing to Cloudflare Realtime")
+        await cf_whip_loop()
+        return
 
     # GLib mainloop w tle (stabilizuje GStreamer/WeRTC)
     t = threading.Thread(target=start_glib_mainloop, daemon=True)

@@ -19,7 +19,7 @@
   <div class="row">
     Room: <input id="room" value="test1"/>
     Signaling URL: <input id="wsurl" style="width:380px" value="wss://79-76-127-159.nip.io/"/>
-    <button id="connect">Connect</button>
+    <button id="connect">Connect (Manual WebRTC)</button>
   </div>
 
   <video id="v" autoplay playsinline controls muted></video>
@@ -28,8 +28,99 @@
     Sterowanie: <b>W/S</b> gaz +/-, <b>Space</b> stop.
   </div>
 
+  <div class="row">
+    Cloudflare App ID: <span id="cf-app">(loading)</span> | Token: <span id="cf-token">(hidden)</span>
+  </div>
+
+  <h3>Cloudflare Realtime SFU</h3>
+  <div class="row">
+    Room ID: <input id="room-cf" value="test-room-1" />
+    <button id="join-cf">Join Room</button>
+  </div>
+
+  <video id="video-cf" autoplay playsinline controls muted style="width: 100%; max-width: 900px; background: #111; margin: 10px 0;"></video>
+
+  <h3>Manual WebRTC (Legacy)</h3>
+
   <pre id="log"></pre>
 
+<script src="https://cdn.jsdelivr.net/npm/@cloudflare/realtime-sdk@0.1/dist/realtime.min.js"></script>
+
+<script>
+const logEl = document.getElementById("log");
+const videoEl = document.getElementById("v");
+const videoCfEl = document.getElementById("video-cf");
+
+function log(...a){ logEl.textContent += a.join(" ") + "\n"; }
+
+let ws, pc, dc;
+let cfAppId = "";
+let cfToken = "";
+let cfSession = null;
+
+async function loadConfig() {
+  try {
+    const res = await fetch("/config");
+    const cfg = await res.json();
+    cfAppId = cfg.appId || "";
+    if (cfg.hasToken) cfToken = cfg.token || "";
+    document.getElementById("cf-app").textContent = cfAppId || "(none)";
+    document.getElementById("cf-token").textContent = cfg.hasToken ? "(from env)" : "(not set)";
+    log("Cloudflare config loaded");
+  } catch (e) {
+    log("Failed to load /config", e);
+  }
+}
+
+// ===== CLOUDFLARE REALTIME SFU =====
+async function joinCfRoom() {
+  if (!cfAppId || !cfToken) {
+    log("ERROR: No CF AppID or Token");
+    return;
+  }
+
+  const roomId = document.getElementById("room-cf").value.trim();
+  if (!roomId) {
+    log("ERROR: Room ID empty");
+    return;
+  }
+
+  try {
+    log("Joining CF Realtime room:", roomId);
+
+    // Inicjalizuj sesję Cloudflare Realtime
+    cfSession = new window.Realtime({
+      appId: cfAppId,
+      token: cfToken
+    });
+
+    // Dołącz do pokoju
+    const room = await cfSession.joinRoom(roomId, {
+      profile: "subscriber" // subscriber = tylko odbieranie
+    });
+
+    log("Joined room:", roomId);
+
+    // Subskrybuj na videopublishera
+    room.onpublishedtrack = async (event) => {
+      log("New track published:", event.track.kind);
+      if (event.track.kind === "video") {
+        // Dodaj track do wideo elementu
+        const stream = new MediaStream([event.track]);
+        videoCfEl.srcObject = stream;
+        log("Playing video from publisher");
+      }
+    };
+
+    log("CF Realtime setup complete");
+  } catch (e) {
+    log("CF join error:", e.message);
+  }
+}
+
+document.getElementById("join-cf").onclick = joinCfRoom;
+
+// ===== LEGACY MANUAL WEBRTC =====
 <script>
 const logEl = document.getElementById("log");
 const videoEl = document.getElementById("v");
@@ -133,6 +224,10 @@ document.getElementById("connect").onclick = async () => {
   ws.onopen = async () => {
     log("WS open");
     ws.send(JSON.stringify({ type: "join", roomId, role: "ui" }));
+    // wyślij token Cloudflare do auta/UI w razie potrzeby
+    if (cfAppId || cfToken) {
+      ws.send(JSON.stringify({ type: "cf-auth", appId: cfAppId, token: cfToken }));
+    }
     makePc();
     await startAsViewer();
   };
@@ -145,6 +240,13 @@ document.getElementById("connect").onclick = async () => {
         log("Got SDP offer");
         await handleOffer(msg.sdp);
       }
+    }
+
+    if (msg.type === "cf-auth") {
+      if (msg.appId && !cfAppId) cfAppId = msg.appId;
+      if (msg.token && !cfToken) cfToken = msg.token;
+      log("Received cf-auth (appId only logged):", cfAppId);
+      return;
     }
 
     if (msg.type === "ice" && msg.candidate) {
@@ -256,6 +358,8 @@ setInterval(() => {
   log("throttle:", throttle.toFixed(2), "steering:", steering.toFixed(2));
 }, 10000);
 
+// start
+loadConfig();
 
 </script>
 </body>

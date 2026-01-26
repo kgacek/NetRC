@@ -3,8 +3,21 @@ const http = require("http");
 const WebSocket = require("ws");
 const crypto = require("crypto");
 
+// Cloudflare Realtime (Calls) credentials z ENV
+const CF_APP_ID = process.env.CF_REALTIME_APP_ID || "";
+const CF_TOKEN = process.env.CF_REALTIME_TOKEN || "";
+
 const app = express();
 app.use(express.static("public"));
+
+// Endpoint do pobrania konfiguracji (token nie logujemy!)
+app.get("/config", (_req, res) => {
+  res.json({
+    appId: CF_APP_ID,
+    token: CF_TOKEN ? "use-from-env" : "",
+    hasToken: !!CF_TOKEN,
+  });
+});
 
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
@@ -62,7 +75,13 @@ wss.on("connection", (ws) => {
     // route tylko do drugiej roli
     const target = ws.role === "car" ? room.ui : room.car;
     if (target && target.readyState === WebSocket.OPEN) {
-      console.log(`[WS] route ${data.type} from ${ws.role} to ${ws.role === "car" ? "ui" : "car"}`);
+      if (data.type !== "cf-auth") {
+        console.log(`[WS] route ${data.type} from ${ws.role} to ${ws.role === "car" ? "ui" : "car"}`);
+      }
+      // Jeżeli wiadomość to cf-auth i token jest pusty w serwerze, dołącz z ENV
+      if (data.type === "cf-auth" && !data.token && CF_TOKEN) {
+        data.token = CF_TOKEN;
+      }
       target.send(JSON.stringify(data));
     } else {
       // pomocne w debug
