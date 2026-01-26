@@ -66,6 +66,7 @@ stopping = False
 glib_loop: Optional[GLib.MainLoop] = None
 session_id: Optional[str] = None
 track_id: Optional[str] = None
+asyncio_loop: Optional[asyncio.AbstractEventLoop] = None  # ADD THIS LINE
 
 def log(*a):
     """Log with timestamp."""
@@ -193,9 +194,12 @@ def on_ice_candidate(wb, mlineindex, candidate):
     cand_str = str(candidate)
     log(f"[ICE] Local candidate: {cand_str[:80]}")
     
-    # Send to Cloudflare SFU
-    if session_id and track_id:
-        asyncio.create_task(send_ice_candidate(mlineindex, cand_str))
+    # Send to Cloudflare SFU - schedule in asyncio loop
+    if session_id and asyncio_loop:
+        asyncio.run_coroutine_threadsafe(
+            send_ice_candidate(mlineindex, cand_str), 
+            asyncio_loop
+        )
 
 def on_data_channel(wb: Any, channel: Any) -> None:
     """Handle incoming data channel from browser."""
@@ -279,8 +283,12 @@ def on_offer_created(promise: Gst.Promise, *_):
     sdp_text = sdp_text_from_desc(offer)
     log("[SDP] Created offer, sending to Cloudflare SFU")
 
-    # Send to Cloudflare SFU
-    asyncio.create_task(send_offer_to_cloudflare(sdp_text))
+    # Schedule in asyncio loop (this is called from GLib thread)
+    if asyncio_loop:
+        asyncio.run_coroutine_threadsafe(
+            send_offer_to_cloudflare(sdp_text),
+            asyncio_loop
+        )
 
 async def send_offer_to_cloudflare(offer_sdp: str):
     """Send offer to Cloudflare Realtime SFU and get answer."""
@@ -305,7 +313,9 @@ async def send_offer_to_cloudflare(offer_sdp: str):
             }
         }
         
-        log(f"[CF] Creating session at {url}")
+        log(f"[CF] Creating session...")
+        log(f"[CF] App ID: {CF_REALTIME_APP_ID}")
+        
         response = requests.post(url, json=payload, headers=headers, timeout=10)
         
         if response.status_code == 201:
@@ -318,23 +328,31 @@ async def send_offer_to_cloudflare(offer_sdp: str):
             if tracks:
                 track_id = tracks[0].get("trackName")
             
-            log(f"[CF] Session created: {session_id}")
-            log(f"[CF] Track: {track_id}")
+            log(f"[CF] ═══════════════════════════════════════")
+            log(f"[CF] ✓ Session created!")
+            log(f"[CF] SESSION ID: {session_id}")
+            log(f"[CF] ═══════════════════════════════════════")
+            log(f"[CF] Copy this Session ID to your browser!")
+            if track_id:
+                log(f"[CF] Track: {track_id}")
             
             if answer_sdp:
                 set_remote_description(answer_sdp)
             else:
                 log("[CF] No answer SDP received")
         else:
-            log(f"[CF] Error: status {response.status_code}")
+            log(f"[CF] ✗ Error: HTTP {response.status_code}")
             log(f"[CF] Response: {response.text}")
             
     except Exception as e:
-        log(f"[CF] Request error: {e}")
+        log(f"[CF] ✗ Request error: {e}")
+        import traceback
+        traceback.print_exc()
 
 async def send_ice_candidate(mline: int, candidate: str):
     """Send ICE candidate to Cloudflare SFU."""
     if not session_id:
+        log("[ICE] Skipping - no session yet")
         return
     
     try:
@@ -352,11 +370,13 @@ async def send_ice_candidate(mline: int, candidate: str):
         }
         
         response = requests.post(url, json=payload, headers=headers, timeout=5)
-        if response.status_code != 200:
-            log(f"[CF] ICE candidate error: {response.status_code}")
+        if response.status_code == 200 or response.status_code == 201:
+            log(f"[ICE] ✓ Sent to Cloudflare")
+        else:
+            log(f"[ICE] Error: {response.status_code}")
             
     except Exception as e:
-        log(f"[CF] ICE send error: {e}")
+        log(f"[ICE] Send error: {e}")
 
 def create_offer() -> None:
     """Create WebRTC offer."""
@@ -380,12 +400,24 @@ def start_rpicam() -> int:
 
 async def cloudflare_sfu_loop():
     """Main loop for Cloudflare Realtime SFU."""
-    global pipe, webrtc
+    global pipe, webrtc, asyncio_loop
+    
+    # Store asyncio loop for callbacks
+    asyncio_loop = asyncio.get_running_loop()
     
     if not CF_REALTIME_APP_ID or not CF_REALTIME_TOKEN:
-        log("[CF] ERROR: Missing credentials!")
-        log("[CF] Set CF_REALTIME_APP_ID and CF_REALTIME_TOKEN environment variables")
+        log("[CF] ═══════════════════════════════════════")
+        log("[CF] ERROR: Missing Cloudflare credentials!")
+        log("[CF] ═══════════════════════════════════════")
+        log("[CF] Get credentials from: https://dash.cloudflare.com")
+        log("[CF] Navigate to: Stream > Calls")
+        log("[CF] Then set environment variables:")
+        log("[CF]   export CF_REALTIME_APP_ID='your-app-id'")
+        log("[CF]   export CF_REALTIME_TOKEN='your-token'")
+        log("[CF] ═══════════════════════════════════════")
         return
+
+    log("[CF] Starting with App ID: {CF_REALTIME_APP_ID}")
     
     # GLib mainloop in background
     t = threading.Thread(target=start_glib_mainloop, daemon=True)
