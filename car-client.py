@@ -2,7 +2,7 @@ import asyncio
 import os
 import sys
 import logging
-from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
+from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack, RTCConfiguration, RTCIceServer
 from aiortc.contrib.media import MediaPlayer
 from av import VideoFrame
 import aiohttp
@@ -146,13 +146,11 @@ async def run_stream():
         print(f"Use this Session ID in the browser to connect!")
         print(f"{'='*60}\n")
         
-        # Create peer connection
+        # Create peer connection with proper configuration
         pc = RTCPeerConnection(
-            configuration={
-                'iceServers': [
-                    {'urls': 'stun:stun.cloudflare.com:3478'}
-                ]
-            }
+            configuration=RTCConfiguration(
+                iceServers=[RTCIceServer(urls=['stun:stun.cloudflare.com:3478'])]
+            )
         )
         
         # Add video track
