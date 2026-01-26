@@ -8,7 +8,7 @@ import subprocess
 import threading
 from typing import Optional, Any, Dict
 import time
-import websockets
+import requests
 import serial
 
 import gi
@@ -22,13 +22,10 @@ from gi.repository import Gst, GstWebRTC, GstSdp, GLib  # type: ignore
 Gst.init(None)
 
 # ===== CONFIG =====
-SIGNALING_URL = "wss://79-76-127-159.nip.io/"   # nginx reverse proxy -> node ws
-ROOM_ID = "test1"
-
-# Cloudflare Realtime WHIP (WebRTC-HTTP Ingestion Protocol)
-CF_WHIP_ENDPOINT = os.environ.get("CF_WHIP_ENDPOINT", "https://rtc.live.cloudflare.com/whip")
-CF_APP_ID = os.environ.get("CF_REALTIME_APP_ID", "")
-CF_TOKEN = os.environ.get("CF_REALTIME_TOKEN", "")
+# Cloudflare Realtime SFU
+CF_REALTIME_APP_ID = os.environ.get("CF_REALTIME_APP_ID", "")
+CF_REALTIME_TOKEN = os.environ.get("CF_REALTIME_TOKEN", "")
+CF_REALTIME_API = "https://rtc.live.cloudflare.com/v1/apps"
 
 UART_DEV = "/dev/serial0"
 UART_BAUD = 115200
@@ -38,7 +35,7 @@ THROTTLE_MIN, THROTTLE_MAX = 0, 1000
 STEER_MIN, STEER_MAX = -1000, 1000
 CONTROL_RANGE = 1.0  # ±1.0 from browser
 
-# Kamera: H264 w stdout (ważne: --nopreview)
+# Kamera: H264 w stdout
 RPICAM_CMD = [
     "rpicam-vid",
     "-t", "0",
@@ -62,30 +59,17 @@ def uart_send(throttle: int, steer: int, flags: int) -> None:
     ser.write(line.encode("ascii", "ignore"))
 
 # ===== GLOBALS =====
-ws: Optional[websockets.WebSocketClientProtocol] = None
 pipe: Optional[Gst.Pipeline] = None
 webrtc: Optional[Any] = None
 rpicam_proc: Optional[subprocess.Popen] = None
-asyncio_loop: Optional[asyncio.AbstractEventLoop] = None
 stopping = False
-use_cf_whip = False  # Zmienia się na True jeśli chcemy publikować do Cloudflare WHIP
-
 glib_loop: Optional[GLib.MainLoop] = None
-ice_candidate_queue: list = []  # Queue for ICE candidates before remote description is set
+session_id: Optional[str] = None
+track_id: Optional[str] = None
 
 def log(*a):
     """Log with timestamp."""
     print(f"[{time.strftime('%H:%M:%S')}]", *a, flush=True)
-
-async def ws_send(obj: dict) -> None:
-    if ws is None:
-        return
-    await ws.send(json.dumps(obj))
-
-def _run_coro_threadsafe(coro):
-    if asyncio_loop is None:
-        return
-    asyncio.run_coroutine_threadsafe(coro, asyncio_loop)
 
 # ===== SDP helpers =====
 def sdp_text_from_desc(desc) -> str:
@@ -128,25 +112,7 @@ def start_glib_mainloop():
 
 def make_pipeline(rfd: int) -> tuple[Gst.Pipeline, Any]:
     """Create H264 video pipeline with WebRTC sink."""
-    # Pipeline: fdsrc -> h264parse -> rtph264pay -> application/x-rtp -> webrtcbin
-    # Note: "wb." requests dynamic sink pad from webrtcbin
-    
-    # Cloudflare Calls: zazwyczaj nie wymaga własnego TURN. Pozostaw TURN opcjonalny.
-    use_turn = os.environ.get("USE_TURN", "1") not in ("0", "false", "False")
-    turn_usr = os.environ.get("TURN_USER", "pocuser")
-    turn_pass = os.environ.get("TURN_PASS", "pocpass")
-    turn_host = os.environ.get("TURN_HOST", "79-76-127-159.nip.io")
-    turn_port = os.environ.get("TURN_PORT", "3478")
-
-    stun_server = os.environ.get("STUN_SERVER", "")  # np. stun:stun.cloudflare.com:3478
-
-    turn_url = None
-    if use_turn:
-        turn_url = f"turn://{turn_usr}:{turn_pass}@{turn_host}:{turn_port}"
-        log(f"[TURN] Using server: turn://{turn_usr}:***@{turn_host}:{turn_port}")
-    else:
-        log("[TURN] Disabled (USE_TURN=0) - Cloudflare Calls SFU mode")
-
+    # Simple pipeline for Cloudflare SFU
     desc = (
         f"fdsrc fd={rfd} ! queue ! h264parse ! "
         f"rtph264pay pt=96 config-interval=1 ! "
@@ -154,11 +120,6 @@ def make_pipeline(rfd: int) -> tuple[Gst.Pipeline, Any]:
         f"queue ! wb. "
         f"webrtcbin name=wb bundle-policy=max-bundle "
     )
-
-    if stun_server:
-        desc += f"stun-server=\"{stun_server}\" "
-    if turn_url:
-        desc += f"turn-server=\"{turn_url}\" "
 
     try:
         p = Gst.parse_launch(desc)
@@ -170,15 +131,6 @@ def make_pipeline(rfd: int) -> tuple[Gst.Pipeline, Any]:
     wb = p.get_by_name("wb")
     if not wb:
         raise RuntimeError("Cannot find webrtcbin element 'wb'")
-    
-    # Don't force relay-only on car side - let it generate all candidates
-    # Browser will select relay candidates due to its iceTransportPolicy
-    # try:
-    #     from gi.repository import GstWebRTC
-    #     wb.set_property("ice-transport-policy", GstWebRTC.WebRTCICETransportPolicy.RELAY)
-    #     log("[ICE] Set ice-transport-policy to RELAY")
-    # except Exception as e:
-    #     log(f"[ICE] Warning: Could not set ice-transport-policy: {e}")
 
     return p, wb
 
@@ -192,69 +144,19 @@ def on_bus_message(bus: Gst.Bus, message: Gst.Message):
         log("[GST] WARN:", err, dbg)
     elif t == Gst.MessageType.EOS:
         log("[GST] EOS")
-    elif t == Gst.MessageType.STATE_CHANGED:
-        # Don't log all state changes, too verbose
-        pass
-    elif t == Gst.MessageType.INFO:
-        info, dbg = message.parse_info()
-        log(f"[GST] INFO: {info}, {dbg}")
-    else:
-        # Log other message types that might contain TURN errors
-        struct = message.get_structure()
-        if struct and "ice" in struct.get_name().lower():
-            log(f"[GST] {message.type}: {struct.to_string()}")
     return True
 
 def on_ice_candidate(wb, mlineindex, candidate):
-    """Handle ICE candidate generation. Log and send to remote peer.
-    
-    Wywoływane przez GStreamer gdy zostanie wygenerowany nowy kandydat ICE.
-    Kandydaty są wysyłane do przeglądarki przez WebSocket.
-    
-    Args:
-        wb: WebRTC bin element
-        mlineindex: Indeks linii w SDP (0 dla pierwszego media stream)
-        candidate: Obiekt kandydata ICE z GStreamer
-    """
+    """Handle ICE candidate - send to Cloudflare."""
     cand_str = str(candidate)
+    log(f"[ICE] Local candidate: {cand_str[:80]}")
     
-    # Loguj pełny candidate string do debugowania
-    log(f"[ICE] Local candidate (full): {cand_str}")
-    
-    # Parsuj typ kandydata ze stringa (host/srflx/relay)
-    # - host: lokalne IP urządzenia
-    # - srflx: publiczne IP z STUN (Server Reflexive)
-    # - relay: IP z TURN server (najbardziej niezawodny, ale wymaga TURN)
-    cand_type = "unknown"
-    if "typ host" in cand_str:
-        cand_type = "host"
-    elif "typ srflx" in cand_str:
-        cand_type = "srflx"
-    elif "typ relay" in cand_str:
-        cand_type = "relay"
-    
-    # Wyciągnij adres IP (4-te pole w candidate string)
-    parts = cand_str.split()
-    ip_addr = parts[4] if len(parts) > 4 else "?"
-    
-    log(f"[ICE] Type: {cand_type}, IP: {ip_addr}")
-    
-    # Wyślij kandydata do przeglądarki przez WebSocket
-    # Format zgodny z RTCIceCandidate (WebRTC standard)
-    # sdpMid=None jest OK dla prostych przypadków (automatycznie dopasowane)
-    _run_coro_threadsafe(
-        ws_send({
-            "type": "ice",
-            "candidate": {
-                "candidate": cand_str,
-                "sdpMLineIndex": int(mlineindex),
-                "sdpMid": None  # None = auto, lub "0" dla konkretnego media stream
-            }
-        })
-    )
+    # Send to Cloudflare SFU
+    if session_id and track_id:
+        asyncio.create_task(send_ice_candidate(mlineindex, cand_str))
 
 def on_data_channel(wb: Any, channel: Any) -> None:
-    """Handle incoming data channel."""
+    """Handle incoming data channel from browser."""
     def _on_open(ch: Any) -> None:
         label = ch.get_property("label") if hasattr(ch, "get_property") else "unknown"
         log(f"[DC] open label={label}")
@@ -290,114 +192,12 @@ def on_data_channel(wb: Any, channel: Any) -> None:
     log("[DC] handlers connected")
 
 
-def add_ice_candidate_from_msg(msg: Dict[str, Any]):
-    """Add ICE candidate from message received from browser.
-    
-    Odbiera kandydata ICE od przeglądarki i dodaje go do WebRTC connection.
-    Kandydaty muszą być dodane PRZED lub PO ustawieniu remote description,
-    ale GStreamer obsługuje kolejkowanie wewnętrznie jeśli trzeba.
-    
-    Args:
-        msg: Wiadomość JSON z WebSocket zawierająca kandidata
-    """
+def set_remote_description(sdp_text: str):
+    """Set remote SDP answer from Cloudflare."""
     if webrtc is None:
         return
 
-    # Wyciągnij obiekt kandydata z wiadomości
-    # Format: {"type":"ice", "candidate":{"candidate":"...", "sdpMLineIndex":0}}
-    ice = msg.get("candidate") or msg.get("ice") or {}
-    
-    # Kandydat to string w formacie ICE (RFC 5245)
-    # Przykład: "candidate:1 1 UDP 2015363327 192.168.1.100 54321 typ host"
-    cand = ice.get("candidate")
-    mline = ice.get("sdpMLineIndex", 0)
-
-    if not cand:
-        log(f"[ICE] Empty candidate in message: {msg}")
-        return
-    
-    # Loguj pełnego kandydata do debugowania
-    # Ważne przy problemach z połączeniem (np. czy relay działa)
-    log(f"[ICE] Received candidate from browser: {cand}")
-    log(f"[ICE] mlineIndex: {mline}")
-    
-    # GStreamer oczekuje raw candidate string (bez "a=" prefix)
-    # Emit signal do webrtcbin aby dodał kandydata
-    try:
-        webrtc.emit("add-ice-candidate", int(mline), str(cand))
-        log(f"[ICE] Successfully added candidate via GStreamer")
-    except Exception as e:
-        log(f"[ICE] Error adding candidate via GStreamer: {e}")
-    except Exception as e:
-        log(f"[ICE] Error adding candidate: {e}")
-
-
-def process_queued_ice_candidates():
-    """Process all queued ICE candidates after remote description is set."""
-    global ice_candidate_queue
-    if webrtc is None:
-        return
-    
-    while ice_candidate_queue:
-        mline, cand = ice_candidate_queue.pop(0)
-        try:
-            log(f"[ICE] Adding queued candidate: {cand[:50]}...")
-            webrtc.emit("add-ice-candidate", mline, cand)
-        except Exception as e:
-            log(f"[ICE] Error adding queued candidate: {e}")
-
-
-def clamp_control(value: float, min_val: float = -CONTROL_RANGE, max_val: float = CONTROL_RANGE) -> float:
-    """Clamp control value to valid range."""
-    return max(min_val, min(max_val, value))
-
-
-def parse_control_input(data: Dict[str, Any]) -> tuple[int, int, int]:
-    """Parse and convert control input to UART format.
-    
-    Returns: (throttle: 0-1000, steer: -1000-1000, flags: int)
-    """
-    thr = clamp_control(float(data.get("throttle", 0.0)))
-    st = clamp_control(float(data.get("steering", data.get("steer", 0.0))))
-    flags = int(data.get("flags", 0))
-    
-    throttle = int((thr + 1.0) * 0.5 * THROTTLE_MAX)
-    throttle = max(THROTTLE_MIN, min(THROTTLE_MAX, throttle))
-    
-    steer = int(st * STEER_MAX)
-    steer = max(STEER_MIN, min(STEER_MAX, steer))
-    
-    return throttle, steer, flags
-
-
-def _send_hello(ch: Any) -> None:
-    """Send hello message to browser on data channel."""
-    try:
-        ch.emit("send-string", json.dumps({
-            "t": int(time.time() * 1000),
-            "hello": "from rpi"
-        }))
-        log("[DC] sent hello to browser")
-    except Exception as e:
-        log("[DC] send-string failed:", e)
-
-
-def _handle_control_message(msg_text: str) -> None:
-    """Handle control message from browser."""
-    try:
-        data = json.loads(msg_text)
-        throttle, steer, flags = parse_control_input(data)
-        uart_send(throttle, steer, flags)
-    except json.JSONDecodeError as e:
-        log("[DC] JSON parse error:", e)
-    except Exception as e:
-        log("[DC] control error:", e)
-
-def set_remote_description(sdp_type: str, sdp_text: str):
-    if webrtc is None:
-        return
-
-    log(f"[SDP] Setting remote {sdp_type}, length: {len(sdp_text)}")
+    log(f"[SDP] Setting remote answer, length: {len(sdp_text)}")
     
     res, sdpmsg = GstSdp.SDPMessage.new()
     if res != GstSdp.SDPResult.OK:
@@ -407,35 +207,16 @@ def set_remote_description(sdp_type: str, sdp_text: str):
     if res != GstSdp.SDPResult.OK:
         raise RuntimeError(f"sdp_message_parse_buffer failed: {res}")
 
-    sdp_t = GstWebRTC.WebRTCSDPType.OFFER if sdp_type == "offer" else GstWebRTC.WebRTCSDPType.ANSWER
-    desc = GstWebRTC.WebRTCSessionDescription.new(sdp_t, sdpmsg)
-
-    # WAŻNE: czekamy aż remote SDP faktycznie się ustawi
-    promise = Gst.Promise.new_with_change_func(on_set_remote_done, None, None)
+    desc = GstWebRTC.WebRTCSessionDescription.new(GstWebRTC.WebRTCSDPType.ANSWER, sdpmsg)
+    
+    promise = Gst.Promise.new()
     webrtc.emit("set-remote-description", desc, promise)
-
-def on_set_remote_done(promise: Gst.Promise, *_):
-    """Remote SDP has been set. Process queued ICE candidates."""
-    global remote_desc_set
+    promise.wait()
     
-    result = promise.wait()
-    log(f"[SDP] promise.wait() result: {result}")
-    
-    # Check for errors in promise
-    if result == Gst.PromiseResult.REPLIED:
-        reply = promise.get_reply()
-        # Reply can be None even on success for set-remote-description
-        log(f"[SDP] Promise replied, reply: {reply}")
-        remote_desc_set = True
-        log("[SDP] Remote description set successfully")
-    elif result == Gst.PromiseResult.INTERRUPTED:
-        log("[SDP] Promise interrupted")
-    elif result == Gst.PromiseResult.EXPIRED:
-        log("[SDP] Promise expired")
-    else:
-        log(f"[SDP] Promise result unknown: {result}")
+    log("[SDP] Remote description set")
 
 def on_offer_created(promise: Gst.Promise, *_):
+    """Handle offer creation - send to Cloudflare SFU."""
     if webrtc is None:
         return
 
@@ -444,92 +225,105 @@ def on_offer_created(promise: Gst.Promise, *_):
     if reply is None:
         log("[SDP] create-offer failed: reply is None")
         return
+    
     offer = reply.get_value("offer")
     if offer is None:
         log("[SDP] offer is None")
         return
 
-    # ustaw local
+    # Set local description
     webrtc.emit("set-local-description", offer, Gst.Promise.new())
 
     sdp_text = sdp_text_from_desc(offer)
-    log("[SDP] sending OFFER")
+    log("[SDP] Created offer, sending to Cloudflare SFU")
 
-    _run_coro_threadsafe(
-        ws_send({"type": "sdp", "sdp": {"type": "offer", "sdp": sdp_text}})
-    )
+    # Send to Cloudflare SFU
+    asyncio.create_task(send_offer_to_cloudflare(sdp_text))
 
+async def send_offer_to_cloudflare(offer_sdp: str):
+    """Send offer to Cloudflare Realtime SFU and get answer."""
+    global session_id, track_id
+    
+    if not CF_REALTIME_APP_ID or not CF_REALTIME_TOKEN:
+        log("[CF] Missing credentials - set CF_REALTIME_APP_ID and CF_REALTIME_TOKEN")
+        return
+    
+    try:
+        # Create new session
+        url = f"{CF_REALTIME_API}/{CF_REALTIME_APP_ID}/sessions/new"
+        headers = {
+            "Authorization": f"Bearer {CF_REALTIME_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "sessionDescription": {
+                "type": "offer",
+                "sdp": offer_sdp
+            }
+        }
+        
+        log(f"[CF] Creating session at {url}")
+        response = requests.post(url, json=payload, headers=headers, timeout=10)
+        
+        if response.status_code == 201:
+            data = response.json()
+            session_id = data.get("sessionId")
+            answer_sdp = data.get("sessionDescription", {}).get("sdp")
+            
+            # Extract track info if needed
+            tracks = data.get("tracks", [])
+            if tracks:
+                track_id = tracks[0].get("trackName")
+            
+            log(f"[CF] Session created: {session_id}")
+            log(f"[CF] Track: {track_id}")
+            
+            if answer_sdp:
+                set_remote_description(answer_sdp)
+            else:
+                log("[CF] No answer SDP received")
+        else:
+            log(f"[CF] Error: status {response.status_code}")
+            log(f"[CF] Response: {response.text}")
+            
+    except Exception as e:
+        log(f"[CF] Request error: {e}")
 
+async def send_ice_candidate(mline: int, candidate: str):
+    """Send ICE candidate to Cloudflare SFU."""
+    if not session_id:
+        return
+    
+    try:
+        url = f"{CF_REALTIME_API}/{CF_REALTIME_APP_ID}/sessions/{session_id}/tracks/new"
+        headers = {
+            "Authorization": f"Bearer {CF_REALTIME_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "iceCandidate": {
+                "candidate": candidate,
+                "sdpMLineIndex": mline
+            }
+        }
+        
+        response = requests.post(url, json=payload, headers=headers, timeout=5)
+        if response.status_code != 200:
+            log(f"[CF] ICE candidate error: {response.status_code}")
+            
+    except Exception as e:
+        log(f"[CF] ICE send error: {e}")
 
 def create_offer() -> None:
-    """Create WebRTC offer with data channel."""
+    """Create WebRTC offer."""
     if webrtc is None:
         log("[OFFER] webrtc is None")
         return
-        
-    # Create data channel
-    dc = webrtc.emit("create-data-channel", "control", None)
-    log("[DC] created (control)")
-
-    def _on_open(ch: Any) -> None:
-        log("[DC] open")
-        _send_hello(ch)
-
-    def _on_close(ch: Any) -> None:
-        log("[DC] close")
-
-    def _on_error(ch: Any, err: str) -> None:
-        log(f"[DC] error: {err}")
-
-    def _on_msg_string(ch: Any, msg: str) -> None:
-        _handle_control_message(msg)
-
-    def _on_msg_data(ch: Any, buf: Any) -> None:
-        try:
-            if hasattr(buf, "get_data"):
-                raw = buf.get_data()
-            else:
-                raw = bytes(buf)
-            msg = raw.decode("utf-8", errors="replace")
-            log(f"[DC] got data (utf8): {msg}")
-            _handle_control_message(msg)
-        except Exception as e:
-            log("[DC] data parse error:", e)
-
-    dc.connect("on-open", _on_open)
-    dc.connect("on-close", _on_close)
-    dc.connect("on-error", _on_error)
-    dc.connect("on-message-string", _on_msg_string)
-    dc.connect("on-message-data", _on_msg_data)
-
-    # Create offer
+    
     promise = Gst.Promise.new_with_change_func(on_offer_created, None, None)
     webrtc.emit("create-offer", None, promise)
-
-
-def on_answer_created(promise: Gst.Promise, *_):
-    if webrtc is None:
-        return
-
-    promise.wait()
-    reply = promise.get_reply()
-    if reply is None:
-        log("[SDP] create-answer failed: reply is None")
-        return
-    answer = reply.get_value("answer")
-    if answer is None:
-        log("[SDP] create-answer failed: answer is None")
-        return
-
-    # ustaw local
-    webrtc.emit("set-local-description", answer, Gst.Promise.new())
-
-    sdp_text = sdp_text_from_desc(answer)
-    log("[SDP] sending ANSWER (first 200 chars):", sdp_text[:200].replace("\n", "\\n"))
-
-    _run_coro_threadsafe(
-        ws_send({"type": "sdp", "sdp": {"type": "answer", "sdp": sdp_text}})
-    )
 
 def start_rpicam() -> int:
     global rpicam_proc
@@ -542,169 +336,75 @@ def start_rpicam() -> int:
     assert rpicam_proc.stdout is not None
     return rpicam_proc.stdout.fileno()
 
-async def cf_whip_loop():
-    """Publikuj strumień H264 do Cloudflare Realtime WHIP endpoint."""
-    import requests
+async def cloudflare_sfu_loop():
+    """Main loop for Cloudflare Realtime SFU."""
+    global pipe, webrtc
     
-    # Przygotuj parametry WHIP
-    whip_url = f"{CF_WHIP_ENDPOINT}?video=true&audio=false"
+    if not CF_REALTIME_APP_ID or not CF_REALTIME_TOKEN:
+        log("[CF] ERROR: Missing credentials!")
+        log("[CF] Set CF_REALTIME_APP_ID and CF_REALTIME_TOKEN environment variables")
+        return
+    
+    # GLib mainloop in background
+    t = threading.Thread(target=start_glib_mainloop, daemon=True)
+    t.start()
     
     try:
-        # Uruchom kamerę i pipeline
+        # Start camera
         cam_fd = start_rpicam()
         log("[CAM] rpicam-vid started, fd:", cam_fd)
         
+        # Create pipeline
         pipe, webrtc = make_pipeline(cam_fd)
         
+        # Setup bus
         bus = pipe.get_bus()
         bus.add_signal_watch()
         bus.connect("message", on_bus_message)
         
+        # Setup WebRTC callbacks
         webrtc.connect("on-ice-candidate", on_ice_candidate)
+        webrtc.connect("on-data-channel", on_data_channel)
+        
+        # Monitor states
+        def on_notify_ice_gathering_state(obj, pspec):
+            state = webrtc.get_property("ice-gathering-state")
+            log(f"[ICE] Gathering state: {state}")
+        
+        def on_notify_ice_connection_state(obj, pspec):
+            state = webrtc.get_property("ice-connection-state")
+            log(f"[ICE] Connection state: {state}")
+        
+        webrtc.connect("notify::ice-gathering-state", on_notify_ice_gathering_state)
+        webrtc.connect("notify::ice-connection-state", on_notify_ice_connection_state)
         
         # Start pipeline
         pipe.set_state(Gst.State.PLAYING)
-        log("[GST] pipeline PLAYING for WHIP")
+        log("[GST] Pipeline PLAYING")
         
-        # Utwórz ofertę
-        webrtc.connect("on-offer", lambda wb: _on_offer_cf(wb, whip_url))
+        # Add video transceiver
+        webrtc.emit(
+            "add-transceiver",
+            GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY,
+            Gst.Caps.from_string("application/x-rtp,media=video,encoding-name=H264,payload=96")
+        )
         
-        # Dodaj transceiver
-        webrtc.emit("add-transceiver", GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY, 
-                   Gst.Caps.from_string("application/x-rtp,media=video,encoding-name=H264,payload=96"))
-        
+        # Create and send offer
         create_offer()
         
-        # Czekaj na ofertę i wyślij do WHIP
-        await asyncio.sleep(2)  # Poczekaj na wygenerowanie oferty
-        
-        log("[CF] Waiting for connection...")
+        # Keep running
+        log("[CF] Streaming to Cloudflare Realtime SFU...")
         while not stopping:
             await asyncio.sleep(1)
             
     except Exception as e:
-        log("[CF] WHIP error:", e)
+        log(f"[CF] Error: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
         if pipe:
             pipe.set_state(Gst.State.NULL)
             log("[GST] Pipeline stopped")
-
-def _on_offer_cf(wb, whip_url):
-    """Handle offer generation dla WHIP."""
-    global webrtc
-    webrtc = wb
-    
-    def _on_offer(wb, promise):
-        reply = promise.get_reply()
-        if reply:
-            offer = reply.get_value("offer")
-            sdp_text = sdp_text_from_desc(offer)
-            log("[SDP] Generated offer for WHIP")
-            
-            # Wyślij ofertę do WHIP (POST request)
-            _send_whip_offer(whip_url, sdp_text)
-    
-    promise = Gst.Promise.new_with_change_func(_on_offer, None, None)
-    wb.emit("create-offer", None, promise)
-
-def _send_whip_offer(whip_url: str, offer_sdp: str):
-    """POST ofertę do Cloudflare WHIP endpoint i odbierz answer."""
-    import requests
-    
-    try:
-        headers = {
-            "Content-Type": "application/sdp",
-            "Authorization": f"Bearer {CF_TOKEN}"
-        }
-        
-        log("[WHIP] Sending offer to", whip_url)
-        response = requests.post(whip_url, data=offer_sdp, headers=headers, timeout=10)
-        
-        if response.status_code == 201:
-            answer_sdp = response.text
-            log("[WHIP] Got answer, status:", response.status_code)
-            
-            # Ustaw remote description
-            set_remote_description("answer", answer_sdp)
-        else:
-            log(f"[WHIP] Error: status {response.status_code}")
-            log("[WHIP] Response:", response.text[:200])
-            
-    except Exception as e:
-        log("[WHIP] Request error:", e)
-
-async def ws_loop():
-    global ws, pipe, webrtc, asyncio_loop, stopping, use_cf_whip
-
-    asyncio_loop = asyncio.get_running_loop()
-
-    # Jeśli są ustawione CF credentials, publikuj do WHIP zamiast normalnego WS
-    if CF_APP_ID and CF_TOKEN:
-        use_cf_whip = True
-        log("[CF] WHIP mode enabled - publishing to Cloudflare Realtime")
-        await cf_whip_loop()
-        return
-
-    # GLib mainloop w tle (stabilizuje GStreamer/WeRTC)
-    t = threading.Thread(target=start_glib_mainloop, daemon=True)
-    t.start()
-
-    cam_fd = start_rpicam()
-    log("[CAM] rpicam-vid started, fd:", cam_fd)
-
-    pipe, webrtc = make_pipeline(cam_fd)
-
-    # bus watch
-    bus = pipe.get_bus()
-    bus.add_signal_watch()
-    bus.connect("message", on_bus_message)
-
-    # callbacks
-    webrtc.connect("on-ice-candidate", on_ice_candidate)
-    
-    # Monitor ICE gathering state
-    def on_notify_ice_gathering_state(obj, pspec):
-        state = webrtc.get_property("ice-gathering-state")
-        log(f"[ICE] Gathering state: {state}")
-    
-    def on_notify_ice_connection_state(obj, pspec):
-        state = webrtc.get_property("ice-connection-state")
-        log(f"[ICE] Connection state: {state}")
-    
-    webrtc.connect("notify::ice-gathering-state", on_notify_ice_gathering_state)
-    webrtc.connect("notify::ice-connection-state", on_notify_ice_connection_state)
-    # webrtc.connect("on-data-channel", on_data_channel)  # dc created by us
-    # start pipeline
-    pipe.set_state(Gst.State.PLAYING)
-    log("[GST] pipeline PLAYING")
-
-    async with websockets.connect(SIGNALING_URL, ping_interval=20, ping_timeout=20) as sock:
-        ws = sock
-        await ws_send({"type": "join", "roomId": ROOM_ID, "role": "car"})
-        log("[WS] joined", ROOM_ID)
-
-        # add transceiver for sending video
-        webrtc.emit("add-transceiver", GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY, Gst.Caps.from_string("application/x-rtp,media=video,encoding-name=H264,payload=96"))
-
-        create_offer()
-
-        async for message in ws:
-            msg = json.loads(message)
-
-            if msg.get("type") == "sdp":
-                sdp = msg.get("sdp", {})
-                sdp_type = sdp.get("type")
-                sdp_text = sdp.get("sdp", "")
-
-                if sdp_type == "answer":
-                    log("[WS] got ANSWER")
-                    set_remote_description("answer", sdp_text)
-
-            elif msg.get("type") == "ice":
-                add_ice_candidate_from_msg(msg)
-
-            if stopping:
-                break
 
 def shutdown(*_):
     global stopping, pipe, rpicam_proc, glib_loop
@@ -746,10 +446,8 @@ def shutdown(*_):
     sys.exit(0)
 
 if __name__ == "__main__":
-    # Disable verbose debug for now
-    # import os
-    # os.environ["GST_DEBUG"] = "webrtcbin:5,nice:5,nicesrc:5,nicesink:5"
-    
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
-    asyncio.run(ws_loop())
+    
+    log("[CF] Starting Cloudflare Realtime SFU client")
+    asyncio.run(cloudflare_sfu_loop())

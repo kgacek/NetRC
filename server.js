@@ -1,7 +1,5 @@
 const express = require("express");
 const http = require("http");
-const WebSocket = require("ws");
-const crypto = require("crypto");
 
 // Cloudflare Realtime (Calls) credentials z ENV
 const CF_APP_ID = process.env.CF_REALTIME_APP_ID || "";
@@ -10,7 +8,7 @@ const CF_TOKEN = process.env.CF_REALTIME_TOKEN || "";
 const app = express();
 app.use(express.static("public"));
 
-// Endpoint do pobrania konfiguracji (token nie logujemy!)
+// Endpoint do pobrania konfiguracji Cloudflare
 app.get("/config", (_req, res) => {
   res.json({
     appId: CF_APP_ID,
@@ -19,87 +17,30 @@ app.get("/config", (_req, res) => {
   });
 });
 
-const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
-
-const rooms = new Map(); // roomId -> { car: ws|null, ui: ws|null }
-
-function rid() {
-  return crypto.randomBytes(4).toString("hex");
-}
-
-wss.on("connection", (ws) => {
-  ws.id = rid();
-  ws.roomId = null;
-  ws.role = null;
-
-  console.log(`[WS] connect id=${ws.id}`);
-
-  ws.on("message", (msg) => {
-    let data;
-    try { data = JSON.parse(msg.toString()); } catch { return; }
-
-    if (data.type === "join") {
-      const roomId = data.roomId;
-      const role = data.role; // "car" albo "ui"
-      if (!roomId || (role !== "car" && role !== "ui")) {
-        ws.send(JSON.stringify({ type: "error", error: "join requires {roomId, role:'car'|'ui'}" }));
-        return;
-      }
-
-      ws.roomId = roomId;
-      ws.role = role;
-
-      if (!rooms.has(roomId)) rooms.set(roomId, { car: null, ui: null });
-      const room = rooms.get(roomId);
-
-      // tylko 1 car i 1 ui
-      if (room[role] && room[role].readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "error", error: `role ${role} already connected` }));
-        ws.close();
-        return;
-      }
-
-      room[role] = ws;
-
-      console.log(`[WS] join room=${roomId} role=${role} id=${ws.id}`);
-      ws.send(JSON.stringify({ type: "joined", roomId, role, id: ws.id }));
-      return;
-    }
-
-    if (!ws.roomId || !ws.role) return;
-
-    const room = rooms.get(ws.roomId);
-    if (!room) return;
-
-    // route tylko do drugiej roli
-    const target = ws.role === "car" ? room.ui : room.car;
-    if (target && target.readyState === WebSocket.OPEN) {
-      if (data.type !== "cf-auth") {
-        console.log(`[WS] route ${data.type} from ${ws.role} to ${ws.role === "car" ? "ui" : "car"}`);
-      }
-      // Jeżeli wiadomość to cf-auth i token jest pusty w serwerze, dołącz z ENV
-      if (data.type === "cf-auth" && !data.token && CF_TOKEN) {
-        data.token = CF_TOKEN;
-      }
-      target.send(JSON.stringify(data));
-    } else {
-      // pomocne w debug
-      console.log(`[WS] drop ${data.type} from ${ws.role} no target`);
-    }
-  });
-
-  ws.on("close", () => {
-    console.log(`[WS] close id=${ws.id} room=${ws.roomId} role=${ws.role}`);
-    if (ws.roomId && rooms.has(ws.roomId)) {
-      const room = rooms.get(ws.roomId);
-      if (room.car === ws) room.car = null;
-      if (room.ui === ws) room.ui = null;
-      if (!room.car && !room.ui) rooms.delete(ws.roomId);
-    }
+// Health check endpoint
+app.get("/health", (_req, res) => {
+  res.json({ 
+    status: "ok", 
+    mode: "cloudflare-sfu",
+    cfConfigured: !!(CF_APP_ID && CF_TOKEN)
   });
 });
 
+const server = http.createServer(app);
+
+// WebSocket signaling is no longer needed - Cloudflare handles all WebRTC signaling
+// Browser connects directly to Cloudflare Realtime API
+// Car publishes to Cloudflare via REST API
+
 server.listen(8080, "127.0.0.1", () => {
-  console.log("HTTP+WS on :8080");
+  console.log("[SERVER] HTTP server on :8080");
+  console.log("[SERVER] Mode: Cloudflare Realtime SFU");
+  console.log("[SERVER] No WebSocket signaling needed - using Cloudflare API");
+  
+  if (!CF_APP_ID || !CF_TOKEN) {
+    console.warn("[SERVER] WARNING: CF_REALTIME_APP_ID or CF_REALTIME_TOKEN not set!");
+    console.warn("[SERVER] Set environment variables for Cloudflare integration");
+  } else {
+    console.log("[SERVER] Cloudflare credentials configured");
+  }
 });

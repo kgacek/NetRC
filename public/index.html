@@ -1,366 +1,389 @@
-<!doctype html>
+<!DOCTYPE html>
 <html>
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>RC WebRTC PoC</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RC Car Control - Cloudflare SFU</title>
   <style>
-    body { font-family: sans-serif; margin: 16px; }
-    video { width: 100%; max-width: 900px; background: #111; }
-    .row { margin: 8px 0; }
-    input { padding: 6px; }
-    button { padding: 8px 12px; }
-    pre { background:#f5f5f5; padding:10px; overflow:auto; }
+    body {
+      margin: 0;
+      padding: 20px;
+      font-family: Arial, sans-serif;
+      background: #1a1a1a;
+      color: #fff;
+    }
+    #container {
+      max-width: 800px;
+      margin: 0 auto;
+    }
+    h1 {
+      text-align: center;
+      color: #f48120;
+    }
+    #video {
+      width: 100%;
+      max-width: 640px;
+      background: #000;
+      display: block;
+      margin: 0 auto 20px;
+    }
+    #controls {
+      background: #2a2a2a;
+      padding: 20px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+    }
+    .control-group {
+      margin-bottom: 15px;
+    }
+    label {
+      display: block;
+      margin-bottom: 5px;
+      color: #f48120;
+    }
+    input[type="range"] {
+      width: 100%;
+    }
+    button {
+      background: #f48120;
+      color: #fff;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 16px;
+      margin-right: 10px;
+    }
+    button:hover {
+      background: #d66d0f;
+    }
+    button:disabled {
+      background: #555;
+      cursor: not-allowed;
+    }
+    #status {
+      background: #2a2a2a;
+      padding: 15px;
+      border-radius: 8px;
+      font-family: monospace;
+      font-size: 12px;
+    }
+    .status-line {
+      margin: 5px 0;
+    }
+    .connected { color: #4caf50; }
+    .disconnected { color: #f44336; }
+    .warning { color: #ff9800; }
+    #config {
+      background: #2a2a2a;
+      padding: 20px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+    }
+    input[type="text"] {
+      width: 100%;
+      padding: 8px;
+      background: #1a1a1a;
+      border: 1px solid #444;
+      color: #fff;
+      border-radius: 4px;
+      margin-bottom: 10px;
+    }
   </style>
 </head>
 <body>
-  <h2>RC WebRTC PoC</h2>
+  <div id="container">
+    <h1>🚗 RC Car Control - Cloudflare SFU</h1>
+    
+    <div id="config">
+      <h3>Cloudflare Realtime Configuration</h3>
+      <div class="control-group">
+        <label>App ID:</label>
+        <input type="text" id="appId" placeholder="your-app-id">
+      </div>
+      <div class="control-group">
+        <label>Session ID:</label>
+        <input type="text" id="sessionId" placeholder="session-id-from-car">
+      </div>
+      <button id="connectBtn">Connect to Stream</button>
+    </div>
 
-  <div class="row">
-    Room: <input id="room" value="test1"/>
-    Signaling URL: <input id="wsurl" style="width:380px" value="wss://79-76-127-159.nip.io/"/>
-    <button id="connect">Connect (Manual WebRTC)</button>
+    <video id="video" autoplay playsinline muted></video>
+    
+    <div id="controls">
+      <h3>Controls</h3>
+      <div class="control-group">
+        <label>Throttle: <span id="throttleVal">0.0</span></label>
+        <input type="range" id="throttle" min="-1" max="1" step="0.1" value="0">
+      </div>
+      <div class="control-group">
+        <label>Steering: <span id="steerVal">0.0</span></label>
+        <input type="range" id="steer" min="-1" max="1" step="0.1" value="0">
+      </div>
+      <button id="stopBtn">Emergency Stop</button>
+    </div>
+
+    <div id="status">
+      <div class="status-line">Status: <span id="connStatus" class="disconnected">Disconnected</span></div>
+      <div class="status-line">ICE: <span id="iceStatus">-</span></div>
+      <div class="status-line">Data Channel: <span id="dcStatus">-</span></div>
+      <div class="status-line">Last Control: <span id="lastControl">-</span></div>
+    </div>
   </div>
 
-  <video id="v" autoplay playsinline controls muted></video>
+  <script>
+    // Cloudflare Realtime SFU client
+    let pc = null;
+    let dataChannel = null;
+    let sessionId = null;
+    let appId = null;
 
-  <div class="row">
-    Sterowanie: <b>W/S</b> gaz +/-, <b>Space</b> stop.
-  </div>
+    const video = document.getElementById('video');
+    const throttleInput = document.getElementById('throttle');
+    const steerInput = document.getElementById('steer');
+    const throttleVal = document.getElementById('throttleVal');
+    const steerVal = document.getElementById('steerVal');
+    const stopBtn = document.getElementById('stopBtn');
+    const connectBtn = document.getElementById('connectBtn');
+    const appIdInput = document.getElementById('appId');
+    const sessionIdInput = document.getElementById('sessionId');
 
-  <div class="row">
-    Cloudflare App ID: <span id="cf-app">(loading)</span> | Token: <span id="cf-token">(hidden)</span>
-  </div>
+    // Status elements
+    const connStatus = document.getElementById('connStatus');
+    const iceStatus = document.getElementById('iceStatus');
+    const dcStatus = document.getElementById('dcStatus');
+    const lastControl = document.getElementById('lastControl');
 
-  <h3>Cloudflare Realtime SFU</h3>
-  <div class="row">
-    Room ID: <input id="room-cf" value="test-room-1" />
-    <button id="join-cf">Join Room</button>
-  </div>
+    function log(msg) {
+      console.log(`[${new Date().toLocaleTimeString()}] ${msg}`);
+    }
 
-  <video id="video-cf" autoplay playsinline controls muted style="width: 100%; max-width: 900px; background: #111; margin: 10px 0;"></video>
+    function updateStatus(element, text, className) {
+      element.textContent = text;
+      element.className = className;
+    }
 
-  <h3>Manual WebRTC (Legacy)</h3>
+    async function connectToCloudflare() {
+      appId = appIdInput.value.trim();
+      sessionId = sessionIdInput.value.trim();
 
-  <pre id="log"></pre>
-
-<script src="https://cdn.jsdelivr.net/npm/@cloudflare/realtime-sdk@0.1/dist/realtime.min.js"></script>
-
-<script>
-const logEl = document.getElementById("log");
-const videoEl = document.getElementById("v");
-const videoCfEl = document.getElementById("video-cf");
-
-function log(...a){ logEl.textContent += a.join(" ") + "\n"; }
-
-let ws, pc, dc;
-let cfAppId = "";
-let cfToken = "";
-let cfSession = null;
-
-async function loadConfig() {
-  try {
-    const res = await fetch("/config");
-    const cfg = await res.json();
-    cfAppId = cfg.appId || "";
-    if (cfg.hasToken) cfToken = cfg.token || "";
-    document.getElementById("cf-app").textContent = cfAppId || "(none)";
-    document.getElementById("cf-token").textContent = cfg.hasToken ? "(from env)" : "(not set)";
-    log("Cloudflare config loaded");
-  } catch (e) {
-    log("Failed to load /config", e);
-  }
-}
-
-// ===== CLOUDFLARE REALTIME SFU =====
-async function joinCfRoom() {
-  if (!cfAppId || !cfToken) {
-    log("ERROR: No CF AppID or Token");
-    return;
-  }
-
-  const roomId = document.getElementById("room-cf").value.trim();
-  if (!roomId) {
-    log("ERROR: Room ID empty");
-    return;
-  }
-
-  try {
-    log("Joining CF Realtime room:", roomId);
-
-    // Inicjalizuj sesję Cloudflare Realtime
-    cfSession = new window.Realtime({
-      appId: cfAppId,
-      token: cfToken
-    });
-
-    // Dołącz do pokoju
-    const room = await cfSession.joinRoom(roomId, {
-      profile: "subscriber" // subscriber = tylko odbieranie
-    });
-
-    log("Joined room:", roomId);
-
-    // Subskrybuj na videopublishera
-    room.onpublishedtrack = async (event) => {
-      log("New track published:", event.track.kind);
-      if (event.track.kind === "video") {
-        // Dodaj track do wideo elementu
-        const stream = new MediaStream([event.track]);
-        videoCfEl.srcObject = stream;
-        log("Playing video from publisher");
+      if (!appId || !sessionId) {
+        alert('Please enter both App ID and Session ID');
+        return;
       }
-    };
 
-    log("CF Realtime setup complete");
-  } catch (e) {
-    log("CF join error:", e.message);
-  }
-}
+      log('Connecting to Cloudflare SFU...');
+      updateStatus(connStatus, 'Connecting...', 'warning');
 
-document.getElementById("join-cf").onclick = joinCfRoom;
+      try {
+        // Create RTCPeerConnection with relay-only policy
+        const config = {
+          iceServers: [
+            { urls: 'stun:stun.cloudflare.com:3478' }
+          ],
+          iceTransportPolicy: 'relay', // Force TURN relay for Cloudflare
+          bundlePolicy: 'max-bundle'
+        };
 
-// ===== LEGACY MANUAL WEBRTC =====
-<script>
-const logEl = document.getElementById("log");
-const videoEl = document.getElementById("v");
-function log(...a){ logEl.textContent += a.join(" ") + "\n"; }
+        pc = new RTCPeerConnection(config);
 
-let ws, pc, dc;
+        // Handle incoming tracks
+        pc.ontrack = (event) => {
+          log('Received track: ' + event.track.kind);
+          if (event.track.kind === 'video') {
+            video.srcObject = event.streams[0];
+          }
+        };
 
+        // Handle ICE candidates
+        pc.onicecandidate = async (event) => {
+          if (event.candidate) {
+            log('ICE candidate: ' + event.candidate.candidate.substring(0, 50));
+            await sendIceCandidate(event.candidate);
+          }
+        };
 
-function makePc() {
-  // Konfiguracja TURN servera dla relay połączeń
-  // TURN jest niezbędny gdy klienci są za NAT/firewall
-  // i nie mogą się połączyć bezpośrednio (host/srflx)
-  const iceServers = [
-    {
-      // Używamy tylko TURN (bez STUN), serwer automatycznie wybierze UDP/TCP
-      // Port 3478 = standardowy port TURN (UDP/TCP)
-      // Port 5349 = TURN over TLS (wyłączony dla uproszczenia)
-      urls: ["turn:79-76-127-159.nip.io:3478"],
-      username: "pocuser",
-      credential: "pocpass"
-    }
-  ];
+        // Monitor ICE connection
+        pc.oniceconnectionstatechange = () => {
+          log('ICE connection state: ' + pc.iceConnectionState);
+          updateStatus(iceStatus, pc.iceConnectionState, 
+            pc.iceConnectionState === 'connected' ? 'connected' : 'warning');
+        };
 
-  pc = new RTCPeerConnection({ 
-    iceServers: iceServers,
-    // iceTransportPolicy: "relay" wymusza używanie TYLKO TURN relay
-    // (ignoruje host i srflx candidates) - dobre do testowania TURN
-    // Zmień na "all" aby pozwolić na wszystkie typy połączeń
-    iceTransportPolicy: "relay"
-  });
-  
-  // Flagi do obsługi kolejkowania ICE candidates
-  pc.remoteDescriptionPending = false;
-  pc.iceCandidateQueue = [];
+        pc.onconnectionstatechange = () => {
+          log('Connection state: ' + pc.connectionState);
+          if (pc.connectionState === 'connected') {
+            updateStatus(connStatus, 'Connected', 'connected');
+          } else if (pc.connectionState === 'failed') {
+            updateStatus(connStatus, 'Failed', 'disconnected');
+          }
+        };
 
-  // Firefox wymaga jawnego transceiver dla odbierania video
-  if (navigator.userAgent.includes("Firefox")) {
-    pc.addTransceiver("video", { direction: "recvonly" });
-  }
+        // Create data channel for controls
+        dataChannel = pc.createDataChannel('control');
+        
+        dataChannel.onopen = () => {
+          log('Data channel opened');
+          updateStatus(dcStatus, 'Open', 'connected');
+        };
 
-  pc.ontrack = (ev) => {
-    log("ontrack");
-    videoEl.srcObject = ev.streams[0];
-  };
+        dataChannel.onclose = () => {
+          log('Data channel closed');
+          updateStatus(dcStatus, 'Closed', 'disconnected');
+        };
 
-  pc.ondatachannel = (ev) => {
-    dc = ev.channel;
-    dc.onopen = () => log("DataChannel open");
-    dc.onmessage = (e) => log("DC msg:", e.data);
-  };
+        dataChannel.onerror = (error) => {
+          log('Data channel error: ' + error);
+          updateStatus(dcStatus, 'Error', 'disconnected');
+        };
 
-  pc.onicecandidate = (ev) => {
-    if (ev.candidate) {
-      const c = ev.candidate;
-      const type = c.type || "unknown";
-      const protocol = c.protocol || "?";
-      const address = c.address || c.candidate.split(" ")[4] || "?";
-      log(`Local ICE [${type}/${protocol}]: ${address} - ${c.candidate.substring(0, 80)}...`);
-      ws.send(JSON.stringify({ type: "ice", candidate: ev.candidate }));
-    } else {
-      log("ICE gathering complete");
-    }
-  };
+        dataChannel.onmessage = (event) => {
+          log('Received: ' + event.data);
+        };
 
-  pc.onconnectionstatechange = () => log("pc connectionState:", pc.connectionState);
-  pc.oniceconnectionstatechange = () => log("pc iceConnectionState:", pc.iceConnectionState);
-}
+        // Add transceiver for receiving video
+        pc.addTransceiver('video', { direction: 'recvonly' });
 
-async function startAsViewer() {
-  // Czekamy na offer od car
-}
+        // Create offer
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
 
-async function handleOffer(sdp) {
-  pc.remoteDescriptionPending = true;
-  await pc.setRemoteDescription(sdp);
-  pc.remoteDescriptionPending = false;
-  
-  // Create answer
-  const answer = await pc.createAnswer();
-  await pc.setLocalDescription(answer);
-  ws.send(JSON.stringify({ type: "sdp", sdp: pc.localDescription }));
-  
-  // Process queued ICE candidates
-  log("Processing " + pc.iceCandidateQueue.length + " queued ICE candidates");
-  while (pc.iceCandidateQueue.length > 0) {
-    const candidate = pc.iceCandidateQueue.shift();
-    try {
-      await pc.addIceCandidate(candidate);
-    } catch (e) {
-      log("Error adding queued candidate:", e.message);
-    }
-  }
-}
-
-document.getElementById("connect").onclick = async () => {
-  const roomId = document.getElementById("room").value.trim();
-  const wsurl = document.getElementById("wsurl").value.trim();
-
-  ws = new WebSocket(wsurl);
-
-  ws.onopen = async () => {
-    log("WS open");
-    ws.send(JSON.stringify({ type: "join", roomId, role: "ui" }));
-    // wyślij token Cloudflare do auta/UI w razie potrzeby
-    if (cfAppId || cfToken) {
-      ws.send(JSON.stringify({ type: "cf-auth", appId: cfAppId, token: cfToken }));
-    }
-    makePc();
-    await startAsViewer();
-  };
-
-  ws.onmessage = async (ev) => {
-    const msg = JSON.parse(ev.data);
-
-    if (msg.type === "sdp") {
-      if (msg.sdp.type === "offer") {
-        log("Got SDP offer");
-        await handleOffer(msg.sdp);
-      }
-    }
-
-    if (msg.type === "cf-auth") {
-      if (msg.appId && !cfAppId) cfAppId = msg.appId;
-      if (msg.token && !cfToken) cfToken = msg.token;
-      log("Received cf-auth (appId only logged):", cfAppId);
-      return;
-    }
-
-    if (msg.type === "ice" && msg.candidate) {
-      // Queue candidates until remote description is set
-      if (pc.remoteDescriptionPending) {
-        log("Queuing ICE candidate (remote desc pending)");
-        pc.iceCandidateQueue.push(msg.candidate);
-      } else if (!pc.remoteDescription) {
-        // Kolejkuj kandydata jeśli remote description jeszcze nie istnieje
-        log("Queuing ICE candidate (no remote description yet)");
-        pc.iceCandidateQueue.push(msg.candidate);
-      } else {
-        // Remote description ustawiony - możemy dodawać kandydatów bezpośrednio
-        const candStr = msg.candidate.candidate ? msg.candidate.candidate.substring(0, 60) : "empty";
-        log("Adding remote ICE candidate:", candStr + "...");
-        try {
-          // Dodaj kandydata do RTCPeerConnection
-          // Przegląda sprawdzi czy kandydat jest kompatybilny i spróbuje połączenia
-          await pc.addIceCandidate(msg.candidate);
-          log("✓ Candidate added successfully");
-        } catch (e) {
-          // Błąd może wystąpić gdy:
-          // - Format kandydata jest nieprawidłowy
-          // - iceTransportPolicy="relay" odrzuca host/srflx candidates
-          // - Kandydat nie pasuje do SDP
-          log("✗ addIceCandidate error:", e.message);
+        // Send offer to Cloudflare and get answer
+        log('Sending offer to Cloudflare...');
+        const answer = await sendOfferToCloudflare(offer);
+        
+        if (answer) {
+          await pc.setRemoteDescription(new RTCSessionDescription(answer));
+          log('Remote description set');
+          updateStatus(connStatus, 'Waiting for video...', 'warning');
         }
+
+      } catch (error) {
+        log('Error: ' + error);
+        updateStatus(connStatus, 'Error: ' + error.message, 'disconnected');
       }
     }
-  };
 
-  ws.onclose = () => log("WS closed");
-  ws.onerror = (e) => log("WS error", e);
-};
+    async function sendOfferToCloudflare(offer) {
+      const url = `https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${sessionId}/renegotiate`;
+      
+      try {
+        const response = await fetch(url, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            sessionDescription: {
+              type: offer.type,
+              sdp: offer.sdp
+            }
+          })
+        });
 
-let throttle = 0;   // -1..1 (W/S)
-let steering = 0;   // -1..1 (A/D)
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+        }
 
-const keys = { w:false, a:false, s:false, d:false };
+        const data = await response.json();
+        log('Got answer from Cloudflare');
+        
+        return {
+          type: data.sessionDescription.type,
+          sdp: data.sessionDescription.sdp
+        };
+      } catch (error) {
+        log('Error sending offer: ' + error);
+        throw error;
+      }
+    }
 
-// Parametry "feelingu" sterowania
-const SEND_HZ = 50;
-const DT = 1 / SEND_HZ;
+    async function sendIceCandidate(candidate) {
+      if (!appId || !sessionId) return;
 
-// Jak szybko narasta przy trzymaniu klawisza (na sekundę)
-const THROTTLE_RATE = 1.6; // 0..1 w ~0.6s
-const STEER_RATE    = 2.8; // skręt szybciej
+      const url = `https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${sessionId}/tracks/new`;
+      
+      try {
+        await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            iceCandidate: {
+              candidate: candidate.candidate,
+              sdpMLineIndex: candidate.sdpMLineIndex,
+              sdpMid: candidate.sdpMid
+            }
+          })
+        });
+      } catch (error) {
+        log('Error sending ICE candidate: ' + error);
+      }
+    }
 
-// jak szybko wraca do zera po puszczeniu (na sekundę)
-const THROTTLE_RETURN = 2.2;
-const STEER_RETURN    = 4.0;
+    function sendControl() {
+      if (!dataChannel || dataChannel.readyState !== 'open') {
+        return;
+      }
 
-function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
+      const control = {
+        throttle: parseFloat(throttleInput.value),
+        steer: parseFloat(steerInput.value),
+        flags: 0,
+        t: Date.now()
+      };
 
-function approachZero(v, amount) {
-  if (v > 0) return Math.max(0, v - amount);
-  if (v < 0) return Math.min(0, v + amount);
-  return 0;
-}
+      dataChannel.send(JSON.stringify(control));
+      lastControl.textContent = JSON.stringify(control);
+    }
 
-function sendControl() {
-  if (!dc || dc.readyState !== "open") return;
-  dc.send(JSON.stringify({ t: Date.now(), throttle, steering }));
-}
+    // Event listeners
+    connectBtn.addEventListener('click', connectToCloudflare);
 
-// tick sterowania (płynne)
-setInterval(() => {
-  // throttle
-  if (keys.w) throttle += THROTTLE_RATE * DT;
-  if (keys.s) throttle -= THROTTLE_RATE * DT;
-  if (!keys.w && !keys.s) throttle = approachZero(throttle, THROTTLE_RETURN * DT);
+    throttleInput.addEventListener('input', (e) => {
+      throttleVal.textContent = e.target.value;
+      sendControl();
+    });
 
-  // steering
-  if (keys.d) steering += STEER_RATE * DT;
-  if (keys.a) steering -= STEER_RATE * DT;
-  if (!keys.a && !keys.d) steering = approachZero(steering, STEER_RETURN * DT);
+    steerInput.addEventListener('input', (e) => {
+      steerVal.textContent = e.target.value;
+      sendControl();
+    });
 
-  throttle = clamp(throttle, -1, 1);
-  steering = clamp(steering, -1, 1);
+    stopBtn.addEventListener('click', () => {
+      throttleInput.value = 0;
+      steerInput.value = 0;
+      throttleVal.textContent = '0.0';
+      steerVal.textContent = '0.0';
+      sendControl();
+    });
 
-  sendControl();
-}, 1000 / SEND_HZ);
+    // Keyboard controls
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowUp') {
+        throttleInput.value = Math.min(1, parseFloat(throttleInput.value) + 0.1);
+        throttleVal.textContent = throttleInput.value;
+        sendControl();
+      } else if (e.key === 'ArrowDown') {
+        throttleInput.value = Math.max(-1, parseFloat(throttleInput.value) - 0.1);
+        throttleVal.textContent = throttleInput.value;
+        sendControl();
+      } else if (e.key === 'ArrowLeft') {
+        steerInput.value = Math.max(-1, parseFloat(steerInput.value) - 0.1);
+        steerVal.textContent = steerInput.value;
+        sendControl();
+      } else if (e.key === 'ArrowRight') {
+        steerInput.value = Math.min(1, parseFloat(steerInput.value) + 0.1);
+        steerVal.textContent = steerInput.value;
+        sendControl();
+      } else if (e.key === ' ') {
+        e.preventDefault();
+        stopBtn.click();
+      }
+    });
 
-// key handling
-window.addEventListener("keydown", (e) => {
-  if (e.code === "KeyW") keys.w = true;
-  if (e.code === "KeyS") keys.s = true;
-  if (e.code === "KeyA") keys.a = true;
-  if (e.code === "KeyD") keys.d = true;
-
-  if (e.code === "Space") {
-    throttle = 0;
-    steering = 0;
-    keys.w = keys.a = keys.s = keys.d = false;
-    sendControl();
-    log("STOP throttle:", throttle.toFixed(2), "steering:", steering.toFixed(2));
-  }
-});
-
-window.addEventListener("keyup", (e) => {
-  if (e.code === "KeyW") keys.w = false;
-  if (e.code === "KeyS") keys.s = false;
-  if (e.code === "KeyA") keys.a = false;
-  if (e.code === "KeyD") keys.d = false;
-});
-
-// opcjonalnie: log co 200ms, żeby nie spamować
-setInterval(() => {
-  log("throttle:", throttle.toFixed(2), "steering:", steering.toFixed(2));
-}, 10000);
-
-// start
-loadConfig();
-
-</script>
+    log('Ready - Enter Cloudflare credentials and Session ID from car');
+  </script>
 </body>
 </html>
