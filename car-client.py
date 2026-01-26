@@ -152,7 +152,7 @@ async def send_offer(session_id, offer_sdp):
     
     async with aiohttp.ClientSession() as session:
         async with session.post(url, headers=headers, json=payload) as response:
-            if response.status != 201:
+            if response.status not in [200, 201]:
                 text = await response.text()
                 raise Exception(f"Failed to send offer: {response.status} - {text}")
             
