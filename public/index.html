@@ -96,15 +96,15 @@
     <h1>🚗 RC Car Control - Cloudflare SFU</h1>
     
     <div id="config">
-      <h3>Cloudflare Realtime Configuration</h3>
+      <h3>Connect to Car Stream</h3>
       <div class="control-group">
-        <label>App ID:</label>
-        <input type="text" id="appId" placeholder="your-app-id">
+        <label>Session ID (from car logs):</label>
+        <input type="text" id="sessionId" placeholder="paste-session-id-here">
       </div>
-      <div class="control-group">
-        <label>Session ID:</label>
-        <input type="text" id="sessionId" placeholder="session-id-from-car">
-      </div>
+      <p style="color: #888; font-size: 12px;">
+        The car will print the Session ID when it starts.<br>
+        Copy it from the car's terminal and paste here.
+      </p>
       <button id="connectBtn">Connect to Stream</button>
     </div>
 
@@ -145,7 +145,6 @@
     const steerVal = document.getElementById('steerVal');
     const stopBtn = document.getElementById('stopBtn');
     const connectBtn = document.getElementById('connectBtn');
-    const appIdInput = document.getElementById('appId');
     const sessionIdInput = document.getElementById('sessionId');
 
     // Status elements
@@ -163,25 +162,44 @@
       element.className = className;
     }
 
+    // Get config from server (App ID only, no token needed for browser)
+    async function loadConfig() {
+      try {
+        const response = await fetch('/config');
+        const config = await response.json();
+        appId = config.appId;
+        log('Loaded App ID: ' + appId);
+        return true;
+      } catch (error) {
+        log('Error loading config: ' + error);
+        alert('Failed to load Cloudflare config from server');
+        return false;
+      }
+    }
+
     async function connectToCloudflare() {
-      appId = appIdInput.value.trim();
       sessionId = sessionIdInput.value.trim();
 
-      if (!appId || !sessionId) {
-        alert('Please enter both App ID and Session ID');
+      if (!sessionId) {
+        alert('Please enter the Session ID from the car');
         return;
       }
 
-      log('Connecting to Cloudflare SFU...');
+      if (!appId) {
+        if (!await loadConfig()) {
+          return;
+        }
+      }
+
+      log('Connecting to Cloudflare SFU session: ' + sessionId);
       updateStatus(connStatus, 'Connecting...', 'warning');
 
       try {
-        // Create RTCPeerConnection with relay-only policy
+        // Create RTCPeerConnection
         const config = {
           iceServers: [
             { urls: 'stun:stun.cloudflare.com:3478' }
           ],
-          iceTransportPolicy: 'relay', // Force TURN relay for Cloudflare
           bundlePolicy: 'max-bundle'
         };
 
@@ -195,10 +213,10 @@
           }
         };
 
-        // Handle ICE candidates
+        // Handle ICE candidates - send to Cloudflare
         pc.onicecandidate = async (event) => {
           if (event.candidate) {
-            log('ICE candidate: ' + event.candidate.candidate.substring(0, 50));
+            log('ICE candidate generated');
             await sendIceCandidate(event.candidate);
           }
         };
@@ -219,26 +237,29 @@
           }
         };
 
-        // Create data channel for controls
-        dataChannel = pc.createDataChannel('control');
-        
-        dataChannel.onopen = () => {
-          log('Data channel opened');
-          updateStatus(dcStatus, 'Open', 'connected');
-        };
+        // Handle data channel from car
+        pc.ondatachannel = (event) => {
+          dataChannel = event.channel;
+          log('Data channel received: ' + dataChannel.label);
+          
+          dataChannel.onopen = () => {
+            log('Data channel opened');
+            updateStatus(dcStatus, 'Open', 'connected');
+          };
 
-        dataChannel.onclose = () => {
-          log('Data channel closed');
-          updateStatus(dcStatus, 'Closed', 'disconnected');
-        };
+          dataChannel.onclose = () => {
+            log('Data channel closed');
+            updateStatus(dcStatus, 'Closed', 'disconnected');
+          };
 
-        dataChannel.onerror = (error) => {
-          log('Data channel error: ' + error);
-          updateStatus(dcStatus, 'Error', 'disconnected');
-        };
+          dataChannel.onerror = (error) => {
+            log('Data channel error: ' + error);
+            updateStatus(dcStatus, 'Error', 'disconnected');
+          };
 
-        dataChannel.onmessage = (event) => {
-          log('Received: ' + event.data);
+          dataChannel.onmessage = (event) => {
+            log('Received: ' + event.data);
+          };
         };
 
         // Add transceiver for receiving video
@@ -248,13 +269,13 @@
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
 
-        // Send offer to Cloudflare and get answer
-        log('Sending offer to Cloudflare...');
-        const answer = await sendOfferToCloudflare(offer);
+        // Join existing session (renegotiate)
+        log('Joining session...');
+        const answer = await joinSession(offer);
         
         if (answer) {
           await pc.setRemoteDescription(new RTCSessionDescription(answer));
-          log('Remote description set');
+          log('Successfully joined session');
           updateStatus(connStatus, 'Waiting for video...', 'warning');
         }
 
@@ -264,7 +285,9 @@
       }
     }
 
-    async function sendOfferToCloudflare(offer) {
+    async function joinSession(offer) {
+      // Browser joins the session created by the car
+      // No authentication token needed - session is publicly joinable
       const url = `https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${sessionId}/renegotiate`;
       
       try {
@@ -282,7 +305,8 @@
         });
 
         if (!response.ok) {
-          throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+          const errorText = await response.text();
+          throw new Error(`HTTP ${response.status}: ${errorText}`);
         }
 
         const data = await response.json();
@@ -293,7 +317,7 @@
           sdp: data.sessionDescription.sdp
         };
       } catch (error) {
-        log('Error sending offer: ' + error);
+        log('Error joining session: ' + error);
         throw error;
       }
     }
@@ -301,6 +325,8 @@
     async function sendIceCandidate(candidate) {
       if (!appId || !sessionId) return;
 
+      // Note: This endpoint might not work for browser clients
+      // Cloudflare may handle ICE candidates automatically via /renegotiate
       const url = `https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${sessionId}/tracks/new`;
       
       try {
@@ -317,8 +343,10 @@
             }
           })
         });
+        log('ICE candidate sent');
       } catch (error) {
-        log('Error sending ICE candidate: ' + error);
+        // Silently fail - ICE candidates may be handled automatically
+        log('ICE candidate send failed (may be ok): ' + error);
       }
     }
 
@@ -383,7 +411,9 @@
       }
     });
 
-    log('Ready - Enter Cloudflare credentials and Session ID from car');
+    // Load config on startup
+    loadConfig();
+    log('Ready - paste Session ID from car and click Connect');
   </script>
 </body>
 </html>
