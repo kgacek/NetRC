@@ -71,6 +71,48 @@ def log(*a):
     """Log with timestamp."""
     print(f"[{time.strftime('%H:%M:%S')}]", *a, flush=True)
 
+# ===== Control helpers =====
+def clamp_control(value: float, min_val: float = -CONTROL_RANGE, max_val: float = CONTROL_RANGE) -> float:
+    """Clamp control value to valid range."""
+    return max(min_val, min(max_val, value))
+
+def parse_control_input(data: Dict[str, Any]) -> tuple[int, int, int]:
+    """Parse and convert control input to UART format."""
+    thr = clamp_control(float(data.get("throttle", 0.0)))
+    st = clamp_control(float(data.get("steering", data.get("steer", 0.0))))
+    flags = int(data.get("flags", 0))
+    
+    throttle = int((thr + 1.0) * 0.5 * THROTTLE_MAX)
+    throttle = max(THROTTLE_MIN, min(THROTTLE_MAX, throttle))
+    
+    steer = int(st * STEER_MAX)
+    steer = max(STEER_MIN, min(STEER_MAX, steer))
+    
+    return throttle, steer, flags
+
+def _send_hello(ch: Any) -> None:
+    """Send hello message to browser on data channel."""
+    try:
+        ch.emit("send-string", json.dumps({
+            "t": int(time.time() * 1000),
+            "hello": "from rpi",
+            "sessionId": session_id
+        }))
+        log("[DC] sent hello to browser")
+    except Exception as e:
+        log("[DC] send-string failed:", e)
+
+def _handle_control_message(msg_text: str) -> None:
+    """Handle control message from browser."""
+    try:
+        data = json.loads(msg_text)
+        throttle, steer, flags = parse_control_input(data)
+        uart_send(throttle, steer, flags)
+    except json.JSONDecodeError as e:
+        log("[DC] JSON parse error:", e)
+    except Exception as e:
+        log("[DC] control error:", e)
+
 # ===== SDP helpers =====
 def sdp_text_from_desc(desc) -> str:
     sdpmsg = None
