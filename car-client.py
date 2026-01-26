@@ -79,6 +79,26 @@ class PiCameraTrack(VideoStreamTrack):
             self.camera.close()
 
 
+def extract_mid_from_sdp(sdp, track_kind='video'):
+    """
+    Extract mid (media stream ID) from SDP for specific track kind
+    """
+    lines = sdp.split('\n')
+    current_mid = None
+    current_kind = None
+    
+    for line in lines:
+        if line.startswith('a=mid:'):
+            current_mid = line.split(':', 1)[1].strip()
+        elif line.startswith('m='):
+            # m=video or m=audio
+            current_kind = line.split(' ', 1)[0][2:]
+            if current_kind == track_kind and current_mid:
+                return current_mid
+    
+    return current_mid
+
+
 async def create_session():
     """
     Create a new session on Cloudflare Calls
@@ -109,6 +129,13 @@ async def send_offer(session_id, offer_sdp):
         'Content-Type': 'application/json'
     }
     
+    # Extract mid from SDP
+    video_mid = extract_mid_from_sdp(offer_sdp, 'video')
+    if not video_mid:
+        raise Exception("Could not extract video mid from SDP")
+    
+    logger.info(f"Extracted video mid: {video_mid}")
+    
     payload = {
         'sessionDescription': {
             'type': 'offer',
@@ -117,7 +144,8 @@ async def send_offer(session_id, offer_sdp):
         'tracks': [
             {
                 'location': 'local',
-                'trackName': 'camera'
+                'trackName': 'camera',
+                'mid': video_mid
             }
         ]
     }
