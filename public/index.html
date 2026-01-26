@@ -145,7 +145,6 @@
                 document.getElementById('connectBtn').disabled = true;
                 updateStatus('Connecting to Cloudflare Calls...');
 
-                // Create peer connection
                 peerConnection = new RTCPeerConnection({
                     iceServers: [
                         { urls: 'stun:stun.cloudflare.com:3478' }
@@ -153,7 +152,6 @@
                     bundlePolicy: 'max-bundle'
                 });
 
-                // Handle incoming tracks
                 peerConnection.ontrack = (event) => {
                     updateStatus('Receiving video stream...', 'success');
                     console.log('Track received:', event.track.kind);
@@ -163,7 +161,6 @@
                     }
                 };
 
-                // Handle connection state
                 peerConnection.onconnectionstatechange = () => {
                     updateStatus(`Connection state: ${peerConnection.connectionState}`);
                     if (peerConnection.connectionState === 'connected') {
@@ -176,10 +173,8 @@
                     }
                 };
 
-                // Add transceiver to receive video - use sendrecv instead of recvonly
-                peerConnection.addTransceiver('video', { 
-                    direction: 'sendrecv'
-                });
+                // Add transceiver to receive video
+                peerConnection.addTransceiver('video', { direction: 'recvonly' });
 
                 // Create offer
                 const offer = await peerConnection.createOffer();
@@ -200,7 +195,6 @@
                     }
                 });
 
-                // Extract mid from SDP
                 const videoMid = extractMidFromSDP(peerConnection.localDescription.sdp, 'video');
                 console.log('Extracted video mid:', videoMid);
 
@@ -208,7 +202,8 @@
                     throw new Error('Could not extract video mid from SDP');
                 }
 
-                // Send offer to Cloudflare - pull the remote track with sessionId
+                // Subscribe to the same session - pull remote track
+                updateStatus('Subscribing to camera track...');
                 const response = await fetch(`https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${sessionIdValue}/tracks/new`, {
                     method: 'POST',
                     headers: {
@@ -223,8 +218,8 @@
                         tracks: [
                             {
                                 location: 'remote',
-                                sessionId: sessionIdValue,
                                 trackName: 'camera',
+                                sessionId: sessionIdValue,
                                 mid: videoMid
                             }
                         ]
@@ -238,69 +233,71 @@
                 }
 
                 const data = await response.json();
-                console.log('Received answer:', data);
+                console.log('Received response:', data);
 
-                // Check if we need to renegotiate
+                // Check for errors in tracks
+                if (data.tracks && data.tracks[0] && data.tracks[0].errorCode) {
+                    throw new Error(`Track error: ${data.tracks[0].errorDescription}`);
+                }
+
+                // Handle renegotiation if required
                 if (data.requiresImmediateRenegotiation) {
-                    updateStatus('Renegotiation required, please try again', 'error');
-                    throw new Error('Immediate renegotiation required');
-                }
+                    updateStatus('Renegotiating connection...');
+                    
+                    // Create new offer
+                    const newOffer = await peerConnection.createOffer();
+                    await peerConnection.setLocalDescription(newOffer);
 
-                // For pulling tracks, we might need to create a new offer/answer
-                // Let's try to renegotiate to get the remote track
-                updateStatus('Renegotiating to receive track...');
-                
-                // Create a new offer after pulling the track
-                const newOffer = await peerConnection.createOffer();
-                await peerConnection.setLocalDescription(newOffer);
-
-                // Wait for ICE gathering again
-                await new Promise((resolve) => {
-                    if (peerConnection.iceGatheringState === 'complete') {
-                        resolve();
-                    } else {
-                        const checkState = () => {
-                            if (peerConnection.iceGatheringState === 'complete') {
-                                peerConnection.removeEventListener('icegatheringstatechange', checkState);
-                                resolve();
-                            }
-                        };
-                        peerConnection.addEventListener('icegatheringstatechange', checkState);
-                    }
-                });
-
-                // Send renegotiation offer
-                const renegResponse = await fetch(`https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${sessionIdValue}/renegotiate`, {
-                    method: 'PUT',
-                    headers: {
-                        'Authorization': `Bearer ${appSecret}`,
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({
-                        sessionDescription: {
-                            type: 'offer',
-                            sdp: peerConnection.localDescription.sdp
+                    // Wait for ICE gathering
+                    await new Promise((resolve) => {
+                        if (peerConnection.iceGatheringState === 'complete') {
+                            resolve();
+                        } else {
+                            const checkState = () => {
+                                if (peerConnection.iceGatheringState === 'complete') {
+                                    peerConnection.removeEventListener('icegatheringstatechange', checkState);
+                                    resolve();
+                                }
+                            };
+                            peerConnection.addEventListener('icegatheringstatechange', checkState);
                         }
-                    })
-                });
-
-                if (!renegResponse.ok) {
-                    const errorText = await renegResponse.text();
-                    console.error('Renegotiation response:', errorText);
-                    throw new Error(`Renegotiation failed! status: ${renegResponse.status} - ${errorText}`);
-                }
-
-                const renegData = await renegResponse.json();
-                console.log('Received renegotiation answer:', renegData);
-
-                // Set remote description from renegotiation
-                if (renegData.sessionDescription) {
-                    await peerConnection.setRemoteDescription({
-                        type: renegData.sessionDescription.type,
-                        sdp: renegData.sessionDescription.sdp
                     });
-                } else {
-                    throw new Error('No session description in renegotiation response');
+
+                    // Renegotiate
+                    const renegResponse = await fetch(`https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${sessionIdValue}/renegotiate`, {
+                        method: 'PUT',
+                        headers: {
+                            'Authorization': `Bearer ${appSecret}`,
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            sessionDescription: {
+                                type: 'offer',
+                                sdp: peerConnection.localDescription.sdp
+                            }
+                        })
+                    });
+
+                    if (!renegResponse.ok) {
+                        const errorText = await renegResponse.text();
+                        throw new Error(`Renegotiation failed: ${renegResponse.status} - ${errorText}`);
+                    }
+
+                    const renegData = await renegResponse.json();
+                    console.log('Renegotiation response:', renegData);
+
+                    if (renegData.sessionDescription) {
+                        await peerConnection.setRemoteDescription({
+                            type: renegData.sessionDescription.type,
+                            sdp: renegData.sessionDescription.sdp
+                        });
+                    }
+                } else if (data.sessionDescription) {
+                    // Set remote description
+                    await peerConnection.setRemoteDescription({
+                        type: data.sessionDescription.type,
+                        sdp: data.sessionDescription.sdp
+                    });
                 }
 
                 updateStatus('Waiting for video stream...', 'success');
@@ -330,7 +327,6 @@
             updateStatus('Disconnected');
         }
 
-        // Clean up on page unload
         window.addEventListener('beforeunload', disconnect);
     </script>
 </body>

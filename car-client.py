@@ -145,7 +145,8 @@ async def send_offer(session_id, offer_sdp):
             {
                 'location': 'local',
                 'trackName': 'camera',
-                'mid': video_mid
+                'mid': video_mid,
+                'bidirectionalMediaStream': False  # Tylko wysyłanie
             }
         ]
     }
@@ -157,7 +158,7 @@ async def send_offer(session_id, offer_sdp):
                 raise Exception(f"Failed to send offer: {response.status} - {text}")
             
             data = await response.json()
-            return data['sessionDescription']
+            return data
 
 
 async def run_stream():
@@ -198,16 +199,21 @@ async def run_stream():
         
         # Send offer to Cloudflare
         logger.info("Sending offer to Cloudflare...")
-        answer = await send_offer(session_id, pc.localDescription.sdp)
+        response_data = await send_offer(session_id, pc.localDescription.sdp)
         
         # Set remote description
         logger.info("Setting remote description...")
-        await pc.setRemoteDescription(RTCSessionDescription(
-            sdp=answer['sdp'],
-            type=answer['type']
-        ))
+        
+        if 'sessionDescription' in response_data:
+            await pc.setRemoteDescription(RTCSessionDescription(
+                sdp=response_data['sessionDescription']['sdp'],
+                type=response_data['sessionDescription']['type']
+            ))
+        else:
+            logger.warning("No sessionDescription in response, connection may not work properly")
         
         logger.info("Streaming started! Press Ctrl+C to stop.")
+        logger.info(f"Track published with name: camera")
         
         # Keep running
         try:
