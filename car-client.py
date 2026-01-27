@@ -19,7 +19,7 @@ CLOUDFLARE_APP_SECRET = os.getenv('CF_REALTIME_TOKEN', 'your-app-secret')
 CLOUDFLARE_API_BASE = 'https://rtc.live.cloudflare.com/v1'
 
 # Signaling server configuration
-SIGNALING_SERVER = os.getenv('SIGNALING_SERVER', 'http://79-76-127-159.nip.io:8080')
+SIGNALING_SERVER = os.getenv('SIGNALING_SERVER', 'https://79-76-127-159.nip.io')
 
 class PiCameraTrack(VideoStreamTrack):
     """
