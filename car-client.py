@@ -66,7 +66,7 @@ class PiCameraTrack(VideoStreamTrack):
             # FPS monitoring using timestamp info
             self.counter += 1
             if self.counter % 100 == 0:
-                fps = 1.0 / (time_base * pts / self.counter) if pts > 0 else 0
+                fps = self.counter / (pts * time_base) if pts > 0 else 0
                 logger.info(f"Streaming at {fps:.2f} FPS")
         else:
             # Simple test pattern fallback
