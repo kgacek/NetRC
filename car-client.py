@@ -39,7 +39,7 @@ class PiCameraTrack(VideoStreamTrack):
             
             # Configure camera for low latency streaming
             config = self.camera.create_video_configuration(
-                main={"size": (W, H), "format": "XBGR888"},
+                main={"size": (W, H)},# "format": "XBGR8888"},
                 controls={"FrameRate": 30}
             )
             self.camera.configure(config)
