@@ -8,6 +8,7 @@ from av import VideoFrame
 import aiohttp
 import json
 from fractions import Fraction
+import time
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -63,11 +64,20 @@ class PiCameraTrack(VideoStreamTrack):
             frame_array = self.camera.capture_array()
             frame = VideoFrame.from_ndarray(frame_array, format="rgb24")
             
-            # FPS monitoring using timestamp info
-            self.counter += 1
-            if self.counter % 100 == 0:
-                fps = self.counter / (pts * time_base) if pts > 0 else 0
-                logger.info(f"Streaming at {fps:.2f} FPS")
+            # FPS monitoring using actual wall clock time
+            current_time = time.time()
+            if not hasattr(self, 'last_log_time'):
+                self.last_log_time = current_time
+                self.frames_since_log = 0
+            
+            self.frames_since_log += 1
+            time_elapsed = current_time - self.last_log_time
+            
+            if time_elapsed >= 5.0:  # Log every 5 seconds
+                actual_fps = self.frames_since_log / time_elapsed
+                logger.info(f"Actual streaming FPS: {actual_fps:.2f}")
+                self.last_log_time = current_time
+                self.frames_since_log = 0
         else:
             # Simple test pattern fallback
             import numpy as np
