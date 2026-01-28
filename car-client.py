@@ -19,8 +19,8 @@ CLOUDFLARE_APP_ID = os.getenv('CF_REALTIME_APP_ID', 'your-app-id')
 CLOUDFLARE_APP_SECRET = os.getenv('CF_REALTIME_TOKEN', 'your-app-secret')
 CLOUDFLARE_API_BASE = 'https://rtc.live.cloudflare.com/v1'
 
-W=1296
-H=972
+W=640
+H=480
 
 # Signaling server configuration
 SIGNALING_SERVER = os.getenv('SIGNALING_SERVER', 'https://79-76-127-159.nip.io')
@@ -33,8 +33,6 @@ class PiCameraTrack(VideoStreamTrack):
         super().__init__()
         try:
             from picamera2 import Picamera2
-            from picamera2.encoders import H264Encoder
-            from picamera2.outputs import FileOutput
             
             self.camera = Picamera2()
             
