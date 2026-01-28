@@ -60,18 +60,23 @@ class PiCameraTrack(VideoStreamTrack):
             # Capture frame from Pi Camera
             frame_array = self.camera.capture_array()
             frame = VideoFrame.from_ndarray(frame_array, format="rgb24")
+            
+            # FPS monitoring using timestamp info
+            self.counter += 1
+            if self.counter % 100 == 0:
+                fps = 1.0 / (time_base * pts / self.counter) if pts > 0 else 0
+                logger.info(f"Streaming at {fps:.2f} FPS")
         else:
-            # Generate test pattern (for testing without camera)
+            # Simple test pattern fallback
             import numpy as np
-            frame_array = np.zeros((480, 640, 3), dtype=np.uint8)
-            # Add some movement
-            offset = (self.counter % 640)
-            frame_array[:, offset:offset+10, :] = 255
-            frame = VideoFrame.from_ndarray(frame_array, format="rgb24")
+            frame = VideoFrame.from_ndarray(
+                np.full((480, 640, 3), self.counter % 256, dtype=np.uint8),
+                format="rgb24"
+            )
+            self.counter += 1
             
         frame.pts = pts
         frame.time_base = time_base
-        self.counter += 1
         
         return frame
 
