@@ -161,12 +161,6 @@ def main():
                     elif char == '\x1b[D':  # Left arrow
                         keys_pressed['left'] = True
                         keys_pressed['right'] = False
-                    else:
-                        # Key release (not perfect, but works for this simple case)
-                        keys_pressed['up'] = False
-                        keys_pressed['down'] = False
-                        keys_pressed['left'] = False
-                        keys_pressed['right'] = False
                 
                 elif char == ' ':  # Space - center steering
                     current_steer = 0
@@ -187,6 +181,7 @@ def main():
                 
                 elif char == '\x03':  # Ctrl+C
                     break
+
             
             # Update controls at regular interval
             now = time.time()
@@ -194,6 +189,10 @@ def main():
                 update_controls()
                 send_command(current_throttle, current_steer)
                 print_status()
+                keys_pressed['up'] = False
+                keys_pressed['down'] = False
+                keys_pressed['left'] = False
+                keys_pressed['right'] = False
                 last_update = now
             
             time.sleep(0.01)
