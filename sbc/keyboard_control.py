@@ -147,9 +147,8 @@ def main():
                 
                 # Check for escape sequences (arrow keys)
                 if char == '\x1b':
-                    # Read the rest of the escape sequence in a non-blocking way
-                    seq = char
-                    for _ in range(2):
+                    next_chars = sys.stdin.read(2)
+                    char += next_chars
                     if char == '\x1b[A':  # Up arrow - SWAPPED TO REVERSE
                         keys_pressed['up'] = True
                         keys_pressed['down'] = False
