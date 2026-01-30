@@ -10,25 +10,25 @@ import select
 UART_DEV = "/dev/ttyS0"
 UART_BAUD = 115200
 
-# Wartości sterowania - płynne przyspieszanie
-THROTTLE_ACCEL = 5   # Przyspieszenie na tick
-THROTTLE_DECEL = 100  # Hamowanie na tick
-STEER_STEP = 50       # Krok skrętu (mniejszy = płynniej)
-MAX_THROTTLE = 400
+# Wartości sterowania
+THROTTLE_ACCEL = 10      # Jak szybko przyspiesza
+THROTTLE_DECEL = 20      # Jak szybko hamuje
+STEER_SPEED = 70         # Prędkość skrętu
+STEER_RETURN_SPEED = 80  # Jak szybko wraca do środka
+MAX_THROTTLE = 300
 MAX_STEER = 1000
 
-# Stan
-current_throttle = 0
-target_throttle = 0
-current_steer = 0
+# Stan pojazdu
+throttle = 0
+steer = 0
 seq = 0
 
-# Wciśnięte klawisze
-keys_pressed = {
-    'up': False,
-    'down': False,
-    'left': False,
-    'right': False
+# Aktualnie wciśnięte klawisze (ciągłe wykrywanie)
+keys = {
+    'w': False,  # Forward
+    's': False,  # Reverse
+    'a': False,  # Left
+    'd': False   # Right
 }
 
 ser = None
@@ -37,7 +37,7 @@ def init_uart():
     global ser
     try:
         ser = serial.Serial(UART_DEV, UART_BAUD, timeout=0.1)
-        print(f"✓ UART opened: {UART_DEV} @ {UART_BAUD}")
+        print(f"✓ UART: {UART_DEV} @ {UART_BAUD}")
         time.sleep(0.2)
         ser.reset_input_buffer()
         ser.reset_output_buffer()
@@ -46,165 +46,183 @@ def init_uart():
         print(f"✗ UART error: {e}")
         return False
 
-def send_command(throttle, steer, flags=0):
+def send_command(thr, st):
     global seq
     seq = (seq + 1) & 0xFFFF
-    cmd = f"T,{int(throttle)},{int(steer)},{int(flags)},{seq}\n"
+    cmd = f"T,{int(thr)},{int(st)},0,{seq}\n"
     try:
         ser.write(cmd.encode('ascii'))
         ser.flush()
-    except Exception as e:
-        print(f"Send error: {e}")
+    except:
+        pass
 
 def clamp(val, min_val, max_val):
     return max(min_val, min(max_val, val))
 
-def print_status():
-    # Clear line
-    sys.stdout.write('\r')
-    sys.stdout.write(' ' * 100)
-    sys.stdout.write('\r')
+def draw_bar(value, max_val, width=10):
+    filled = int((abs(value) / max_val) * width)
+    return '█' * filled + '░' * (width - filled)
+
+def print_hud():
+    sys.stdout.write('\r' + ' ' * 120 + '\r')
     
-    # Print status
-    thr_bar = '█' * (abs(current_throttle) // 100)
-    steer_bar = '█' * (abs(current_steer) // 100)
+    # Throttle bar
+    thr_bar = draw_bar(throttle, MAX_THROTTLE, 20)
+    thr_label = "FWD" if throttle > 0 else "REV" if throttle < 0 else "---"
     
-    thr_dir = "FWD" if current_throttle > 0 else "REV" if current_throttle < 0 else "---"
-    steer_dir = "LEFT " if current_steer > 0 else "RIGHT" if current_steer < 0 else "-----"
+    # Steer bar with center indicator
+    steer_pct = steer / MAX_STEER
+    steer_pos = int((steer_pct + 1) * 10)  # 0-20 pozycja
+    steer_bar = '░' * 10 + '|' + '░' * 10
+    steer_bar = steer_bar[:steer_pos] + '█' + steer_bar[steer_pos+1:]
     
-    sys.stdout.write(f"Throttle: {thr_dir} {current_throttle:+5d} [{thr_bar:10s}] | Steer: {steer_dir} {current_steer:+5d} [{steer_bar:10s}]")
+    # Keys indicator
+    key_w = '▲' if keys['w'] else '△'
+    key_s = '▼' if keys['s'] else '▽'
+    key_a = '◄' if keys['a'] else '◁'
+    key_d = '►' if keys['d'] else '▷'
+    
+    sys.stdout.write(
+        f"[{thr_label}] {thr_bar} {throttle:+5d}  |  "
+        f"[STEER] {steer_bar} {steer:+5d}  |  "
+        f"[{key_w}{key_s}{key_a}{key_d}]"
+    )
     sys.stdout.flush()
 
-def update_controls():
-    global current_throttle, target_throttle, current_steer
+def update_vehicle():
+    global throttle, steer
     
-    # Throttle - płynne przyspieszanie do celu
-    # ZAMIENIONE: UP = reverse, DOWN = forward
-    if keys_pressed['up']:
-        target_throttle = -MAX_THROTTLE  # ZAMIENIONE: UP teraz jedzie do tyłu
-    elif keys_pressed['down']:
-        target_throttle = MAX_THROTTLE   # ZAMIENIONE: DOWN teraz jedzie do przodu
+    # === THROTTLE (jak w grze - W/S) ===
+    if keys['w'] and not keys['s']:
+        # W wciśnięty - przyśpieszaj do przodu
+        throttle = min(50+throttle + THROTTLE_ACCEL, MAX_THROTTLE)
+    elif keys['s'] and not keys['w']:
+        # S wciśnięty - przyśpieszaj do tyłu
+        throttle = max(throttle - THROTTLE_ACCEL-50, -MAX_THROTTLE)
     else:
-        # Brak klawisza - hamuj do zera
-        target_throttle = 0
+        # Brak W/S - hamuj do zera
+        if throttle > 0:
+            throttle = max(0, throttle - THROTTLE_DECEL)
+        elif throttle < 0:
+            throttle = min(0, throttle + THROTTLE_DECEL)
     
-    # Płynne dochodzenie do target
-    if current_throttle < target_throttle:
-        current_throttle = min(current_throttle + THROTTLE_ACCEL, target_throttle)
-    elif current_throttle > target_throttle:
-        current_throttle = max(current_throttle - THROTTLE_DECEL, target_throttle)
-    
-    # Steer - krokowy, pozostaje gdy puszczony
-    if keys_pressed['left']:
-        current_steer = clamp(current_steer + STEER_STEP, -MAX_STEER, MAX_STEER)
-    elif keys_pressed['right']:
-        current_steer = clamp(current_steer - STEER_STEP, -MAX_STEER, MAX_STEER)
+    # === STEERING (jak w grze - A/D) ===
+    if keys['a'] and not keys['d']:
+        # A wciśnięty - skręcaj w lewo
+        steer = min(steer + STEER_SPEED, MAX_STEER)
+    elif keys['d'] and not keys['a']:
+        # D wciśnięty - skręcaj w prawo
+        steer = max(steer - STEER_SPEED, -MAX_STEER)
+    else:
+        # Brak A/D - wracaj do środka
+        if steer > 0:
+            steer = max(0, steer - STEER_RETURN_SPEED)
+        elif steer < 0:
+            steer = min(0, steer + STEER_RETURN_SPEED)
 
+def get_char_nonblocking():
+    """Odczytaj znak bez blokowania"""
+    if select.select([sys.stdin], [], [], 0)[0]:
+        return sys.stdin.read(1)
+    return None
 
 def main():
-    global current_throttle, current_steer
+    global throttle, steer
     
-    print("=== RC Car Keyboard Control ===")
-    print("Controls:")
-    print("  ↑ / ↓  - Reverse / Forward (zamienione, płynne, auto-zero)")
-    print("  ← / →  - Right / Left (zamienione, pozostaje pozycja)")
-    print("  SPACE  - Reset steering to center")
-    print("  q      - Quit")
-    print("  a      - ARM ESC")
+    print("╔════════════════════════════════════════╗")
+    print("║    RC Car - Game-Style Control        ║")
+    print("╚════════════════════════════════════════╝")
+    print()
+    print("  W / S  - Forward / Reverse (progressive)")
+    print("  A / D  - Left / Right (auto-center)")
+    print("  SPACE  - Emergency brake")
+    print("  R      - Reset (center + stop)")
+    print("  Q      - Quit")
     print()
     
     if not init_uart():
         return
     
-    # Wait for READY
-    print("Waiting for ESP32 READY...")
+    # Czekaj na READY
+    print("Waiting for ESP32...")
     start = time.time()
     while time.time() - start < 3:
         if ser.in_waiting:
             line = ser.readline().decode('ascii', errors='ignore').strip()
-            if line:
-                print(f"ESP32: {line}")
             if "READY" in line:
+                print(f"✓ {line}\n")
                 break
     
-    print("\n✓ Ready! Use arrow keys to control.\n")
-    
-    # Save terminal settings
+    # Terminal raw mode
     old_settings = termios.tcgetattr(sys.stdin)
     
     try:
-        # Set terminal to raw mode
         tty.setraw(sys.stdin.fileno())
-        
-        print_status()
+        print_hud()
         
         last_update = time.time()
+        last_key_time = {}
+        KEY_REPEAT_TIMEOUT = 0.05  # 50ms bez klawisza = zwolniony
         
         while True:
-            # Non-blocking read
-            if select.select([sys.stdin], [], [], 0)[0]:
-                char = sys.stdin.read(1)
-                
-                # Check for escape sequences (arrow keys)
-                if char == '\x1b':
-                    next_chars = sys.stdin.read(2)
-                    char += next_chars
-                    if char == '\x1b[A':  # Up arrow - SWAPPED TO REVERSE
-                        keys_pressed['up'] = True
-                        keys_pressed['down'] = False
-                    elif char == '\x1b[B':  # Down arrow - SWAPPED TO FORWARD
-                        keys_pressed['down'] = True
-                        keys_pressed['up'] = False
-                    elif char == '\x1b[C':  # Right arrow
-                        keys_pressed['right'] = True
-                        keys_pressed['left'] = False
-                    elif char == '\x1b[D':  # Left arrow
-                        keys_pressed['left'] = True
-                        keys_pressed['right'] = False
-                
-                elif char == ' ':  # Space - center steering
-                    current_steer = 0
-                
-                elif char == 'a':  # ARM
-                    print("\nSending ARM command...")
-                    ser.write(b"A,1\n")
-                    ser.flush()
-                    time.sleep(0.1)
-                    print_status()
-                
+            now = time.time()
+            
+            # Odczytaj klawisz
+            char = get_char_nonblocking()
+            
+            if char:
+                if char == 'w':
+                    keys['w'] = True
+                    last_key_time['w'] = now
+                elif char == 's':
+                    keys['s'] = True
+                    last_key_time['s'] = now
+                elif char == 'a':
+                    keys['a'] = True
+                    last_key_time['a'] = now
+                elif char == 'd':
+                    keys['d'] = True
+                    last_key_time['d'] = now
+                elif char == ' ':  # Emergency brake
+                    throttle = 0
+                    steer = 0
+                    keys = {'w': False, 's': False, 'a': False, 'd': False}
+                elif char == 'r':  # Reset
+                    throttle = 0
+                    steer = 0
+                    keys = {'w': False, 's': False, 'a': False, 'd': False}
                 elif char == 'q':  # Quit
-                    print("\n\nStopping and quitting...")
-                    current_throttle = 0
-                    current_steer = 0
-                    send_command(0, 0, 1)
                     break
-                
                 elif char == '\x03':  # Ctrl+C
                     break
-
             
-            # Update controls at regular interval
-            now = time.time()
-            if now - last_update >= 0.02:  # 50Hz update rate
-                update_controls()
-                send_command(current_throttle, current_steer)
-                print_status()
-                keys_pressed['up'] = False
-                keys_pressed['down'] = False
-                keys_pressed['left'] = False
-                keys_pressed['right'] = False
+            # Sprawdź timeout klawiszy (wykryj zwolnienie)
+            for key in ['w', 's', 'a', 'd']:
+                if keys[key] and (now - last_key_time.get(key, 0)) > KEY_REPEAT_TIMEOUT:
+                    keys[key] = False
+            
+            # Update pojazdu (50Hz)
+            if now - last_update >= 0.02:
+                update_vehicle()
+                send_command(throttle, steer)
+                print_hud()
                 last_update = now
             
-            time.sleep(0.01)
+            time.sleep(0.005)
+    
+    except KeyboardInterrupt:
+        pass
     
     finally:
-        # Restore terminal settings
+        # Restore terminal
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
         
-        # Stop car
-        send_command(0, 0, 1)
+        # Stop
+        throttle = 0
+        steer = 0
+        send_command(0, 0)
+        time.sleep(0.1)
         
-        # Close serial
         if ser:
             ser.close()
         
