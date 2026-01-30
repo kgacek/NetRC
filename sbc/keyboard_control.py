@@ -11,10 +11,10 @@ UART_DEV = "/dev/ttyS0"
 UART_BAUD = 115200
 
 # Wartości sterowania - płynne przyspieszanie
-THROTTLE_ACCEL = 20   # Przyspieszenie na tick
+THROTTLE_ACCEL = 5   # Przyspieszenie na tick
 THROTTLE_DECEL = 100  # Hamowanie na tick
 STEER_STEP = 50       # Krok skrętu (mniejszy = płynniej)
-MAX_THROTTLE = 800
+MAX_THROTTLE = 400
 MAX_STEER = 1000
 
 # Stan
@@ -100,6 +100,7 @@ def update_controls():
     elif keys_pressed['right']:
         current_steer = clamp(current_steer - STEER_STEP, -MAX_STEER, MAX_STEER)
 
+
 def main():
     global current_throttle, current_steer
     
@@ -146,21 +147,27 @@ def main():
                 
                 # Check for escape sequences (arrow keys)
                 if char == '\x1b':
-                    next_chars = sys.stdin.read(2)
-                    char += next_chars
-                    
-                    if char == '\x1b[A':  # Up arrow - ZAMIENIONE NA REVERSE
+                    # Read the rest of the escape sequence in a non-blocking way
+                    seq = char
+                    for _ in range(2):
+                    if char == '\x1b[A':  # Up arrow - SWAPPED TO REVERSE
                         keys_pressed['up'] = True
                         keys_pressed['down'] = False
-                    elif char == '\x1b[B':  # Down arrow - ZAMIENIONE NA FORWARD
+                    elif char == '\x1b[B':  # Down arrow - SWAPPED TO FORWARD
                         keys_pressed['down'] = True
                         keys_pressed['up'] = False
-                    elif char == '\x1b[C':  # Right arrow - ZAMIENIONE NA LEFT
-                        keys_pressed['left'] = True
-                        keys_pressed['right'] = False
-                    elif char == '\x1b[D':  # Left arrow - ZAMIENIONE NA RIGHT
+                    elif char == '\x1b[C':  # Right arrow
                         keys_pressed['right'] = True
                         keys_pressed['left'] = False
+                    elif char == '\x1b[D':  # Left arrow
+                        keys_pressed['left'] = True
+                        keys_pressed['right'] = False
+                    else:
+                        # Key release (not perfect, but works for this simple case)
+                        keys_pressed['up'] = False
+                        keys_pressed['down'] = False
+                        keys_pressed['left'] = False
+                        keys_pressed['right'] = False
                 
                 elif char == ' ':  # Space - center steering
                     current_steer = 0
