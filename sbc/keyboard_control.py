@@ -11,7 +11,7 @@ UART_DEV = "/dev/ttyS0"
 UART_BAUD = 115200
 
 # Wartości sterowania
-THROTTLE_ACCEL = 10      # Jak szybko przyspiesza
+THROTTLE_ACCEL = 5      # Jak szybko przyspiesza
 THROTTLE_DECEL = 20      # Jak szybko hamuje
 STEER_SPEED = 70         # Prędkość skrętu
 STEER_RETURN_SPEED = 80  # Jak szybko wraca do środka
@@ -95,10 +95,10 @@ def update_vehicle():
     # === THROTTLE (jak w grze - W/S) ===
     if keys['w'] and not keys['s']:
         # W wciśnięty - przyśpieszaj do przodu
-        throttle = min(50+throttle + THROTTLE_ACCEL, MAX_THROTTLE)
+        throttle = max(throttle - THROTTLE_ACCEL-40, -MAX_THROTTLE)
     elif keys['s'] and not keys['w']:
         # S wciśnięty - przyśpieszaj do tyłu
-        throttle = max(throttle - THROTTLE_ACCEL-50, -MAX_THROTTLE)
+        throttle = min(40+throttle + THROTTLE_ACCEL, MAX_THROTTLE)
     else:
         # Brak W/S - hamuj do zera
         if throttle > 0:
@@ -162,7 +162,7 @@ def main():
         
         last_update = time.time()
         last_key_time = {}
-        KEY_REPEAT_TIMEOUT = 0.15  # ZWIĘKSZONE: 150ms bez klawisza = zwolniony
+        KEY_REPEAT_TIMEOUT = 0.2  # ZWIĘKSZONE: 150ms bez klawisza = zwolniony
         
         while True:
             now = time.time()
