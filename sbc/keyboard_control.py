@@ -127,7 +127,7 @@ def get_char_nonblocking():
     return None
 
 def main():
-    global throttle, steer, keys  # DODANE: keys jako global
+    global throttle, steer, keys
     
     print("╔════════════════════════════════════════╗")
     print("║    RC Car - Game-Style Control        ║")
@@ -162,7 +162,7 @@ def main():
         
         last_update = time.time()
         last_key_time = {}
-        KEY_REPEAT_TIMEOUT = 0.05  # 50ms bez klawisza = zwolniony
+        KEY_REPEAT_TIMEOUT = 0.15  # ZWIĘKSZONE: 150ms bez klawisza = zwolniony
         
         while True:
             now = time.time()
@@ -186,19 +186,19 @@ def main():
                 elif char == ' ':  # Emergency brake
                     throttle = 0
                     steer = 0
-                    # POPRAWIONE: zamiast keys = {...}, ustaw każdy klucz
                     keys['w'] = False
                     keys['s'] = False
                     keys['a'] = False
                     keys['d'] = False
+                    last_key_time.clear()  # Wyczyść wszystkie timery
                 elif char == 'r':  # Reset
                     throttle = 0
                     steer = 0
-                    # POPRAWIONE: zamiast keys = {...}, ustaw każdy klucz
                     keys['w'] = False
                     keys['s'] = False
                     keys['a'] = False
                     keys['d'] = False
+                    last_key_time.clear()
                 elif char == 'q':  # Quit
                     break
                 elif char == '\x03':  # Ctrl+C
