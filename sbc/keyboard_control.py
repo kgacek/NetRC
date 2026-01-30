@@ -127,7 +127,7 @@ def get_char_nonblocking():
     return None
 
 def main():
-    global throttle, steer
+    global throttle, steer, keys  # DODANE: keys jako global
     
     print("╔════════════════════════════════════════╗")
     print("║    RC Car - Game-Style Control        ║")
@@ -186,11 +186,19 @@ def main():
                 elif char == ' ':  # Emergency brake
                     throttle = 0
                     steer = 0
-                    keys = {'w': False, 's': False, 'a': False, 'd': False}
+                    # POPRAWIONE: zamiast keys = {...}, ustaw każdy klucz
+                    keys['w'] = False
+                    keys['s'] = False
+                    keys['a'] = False
+                    keys['d'] = False
                 elif char == 'r':  # Reset
                     throttle = 0
                     steer = 0
-                    keys = {'w': False, 's': False, 'a': False, 'd': False}
+                    # POPRAWIONE: zamiast keys = {...}, ustaw każdy klucz
+                    keys['w'] = False
+                    keys['s'] = False
+                    keys['a'] = False
+                    keys['d'] = False
                 elif char == 'q':  # Quit
                     break
                 elif char == '\x03':  # Ctrl+C
