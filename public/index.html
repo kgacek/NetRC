@@ -437,6 +437,10 @@
                     bundlePolicy: 'max-bundle'
                 });
                 
+                // Create temporary DataChannel to include in offer (like Cloudflare example)
+                const tempDc = controlConnection.createDataChannel('server-events', { negotiated: false });
+                tempDc.onmessage = (m) => console.log('Server event:', m);
+                
                 // Create offer for transport
                 const offer = await controlConnection.createOffer();
                 await controlConnection.setLocalDescription(offer);
