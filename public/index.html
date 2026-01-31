@@ -420,7 +420,7 @@
                 });
                 
                 controlChannel.onopen = () => {
-                    logger.info('Control DataChannel opened');
+                    console.log('Control DataChannel opened');
                     updateStatus('Control channel ready! Use WASD to control car.', 'success');
                     startControlLoop();
                 };
