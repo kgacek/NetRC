@@ -536,8 +536,34 @@
                     throw new Error(`Failed to create DataChannel: ${JSON.stringify(dcNewData)}`);
                 }
                 
-                // Create negotiated DataChannel with ID from API
                 const controlChannelId = dcNewData.dataChannels[0].id;
+                console.log('Browser DataChannel ID from API:', controlChannelId);
+                
+                // Register control session with signaling server BEFORE creating negotiated DataChannel
+                // This allows RPi to start subscribing
+                const signalingServer = document.getElementById('signalingServer').value;
+                if (signalingServer) {
+                    try {
+                        await fetch(`${signalingServer}/api/control`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                videoSessionId: selectedSessionId,
+                                controlSessionId: myControlSessionId
+                            })
+                        });
+                        console.log('Control session registered with signaling server');
+                        
+                        // Wait for RPi to complete its subscription
+                        console.log('Waiting 2s for RPi to subscribe...');
+                        await new Promise(resolve => setTimeout(resolve, 2000));
+                        
+                    } catch (e) {
+                        console.warn('Could not register control session:', e);
+                    }
+                }
+                
+                // NOW create negotiated DataChannel after RPi had time to subscribe
                 controlChannel = controlConnection.createDataChannel('control', {
                     negotiated: true,
                     id: controlChannelId
@@ -560,27 +586,7 @@
                     console.error('DataChannel error:', error);
                 };
                 
-                // IMPORTANT: Register control session with signaling server FIRST
-                // so RPi can start subscribing before we finish
-                const signalingServer = document.getElementById('signalingServer').value;
-                if (signalingServer) {
-                    try {
-                        await fetch(`${signalingServer}/api/control`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                videoSessionId: selectedSessionId,
-                                controlSessionId: myControlSessionId
-                            })
-                        });
-                        console.log('Control session registered with signaling server');
-                    } catch (e) {
-                        console.warn('Could not register control session:', e);
-                    }
-                }
-                
-                console.log('Control session ready:', myControlSessionId);
-                console.log('Waiting for RPi to subscribe...');
+                console.log('Control setup complete!');
                 
             } catch (error) {
                 console.error('Control setup error:', error);
