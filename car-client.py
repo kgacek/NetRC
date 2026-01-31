@@ -311,6 +311,10 @@ async def run_control_subscriber(car_controller, control_session_id):
                 if car_controller:
                     car_controller.send_command(0, 0)
         
+        # Add dummy audio transceiver just to create valid offer
+        # (aiortc requires at least one media or datachannel to create offer)
+        pc_control.addTransceiver('audio', direction='recvonly')
+        
         # Pull control DataChannel from browser session
         url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/{control_session_id}/tracks/new"
         headers = {
@@ -337,23 +341,38 @@ async def run_control_subscriber(car_controller, control_session_id):
                     'location': 'remote',
                     'sessionId': control_session_id,
                     'trackName': 'control',
-                    'mid': '0'
+                    'mid': '0'  # DataChannel should be at mid 0 in browser session
                 }
             ]
         }
         
+        logger.debug(f"Pulling control with payload: {json.dumps(payload, indent=2)}")
+        
         async with aiohttp.ClientSession() as session:
             async with session.post(url, headers=headers, json=payload) as response:
+                response_text = await response.text()
+                logger.info(f"Control pull response ({response.status}): {response_text}")
+                
                 if response.status in [200, 201]:
-                    data = await response.json()
+                    data = json.loads(response_text)
+                    
+                    # Check for track errors
+                    if 'tracks' in data:
+                        for track in data['tracks']:
+                            if 'errorCode' in track:
+                                logger.error(f"Track error: {track}")
+                                return None
+                    
                     if 'sessionDescription' in data:
                         await pc_control.setRemoteDescription(RTCSessionDescription(
                             sdp=data['sessionDescription']['sdp'],
                             type=data['sessionDescription']['type']
                         ))
-                        logger.info("Control connection established")
+                        logger.info("Control connection established - waiting for DataChannel")
+                    else:
+                        logger.warning("No sessionDescription in control response")
                 else:
-                    logger.error(f"Failed to setup control connection: {await response.text()}")
+                    logger.error(f"Failed to setup control connection: {response_text}")
                     return None
         
         return pc_control
