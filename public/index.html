@@ -243,6 +243,13 @@
                 updateStatus('Please fill in all fields', 'error');
                 return;
             }
+            
+            // IMPORTANT: Disconnect old connections first
+            if (peerConnection || controlConnection) {
+                console.log('Cleaning up old connections...');
+                disconnect();
+                await new Promise(resolve => setTimeout(resolve, 500)); // Wait for cleanup
+            }
 
             try {
                 document.getElementById('connectBtn').disabled = true;

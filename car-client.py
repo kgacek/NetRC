@@ -251,7 +251,9 @@ class CarController:
         try:
             self.ser.write(cmd.encode('ascii'))
             self.ser.flush()
-            logger.info(f"UART sent: {cmd.strip()}")
+            # Only log non-zero commands to reduce spam
+            if throttle != 0 or steer != 0:
+                logger.info(f"UART: T={throttle}, S={steer}")
         except Exception as e:
             logger.error(f"UART send error: {e}")
     
@@ -266,7 +268,6 @@ class CarController:
             throttle = max(-300, min(300, throttle))
             steer = max(-1000, min(1000, steer))
             
-            logger.info(f"Processing control: throttle={throttle}, steer={steer}")
             self.send_command(throttle, steer)
             
         except json.JSONDecodeError:
@@ -413,7 +414,7 @@ async def run_control_subscriber(car_controller, control_session_id):
                     
                     @control_dc.on('message')
                     def on_message(message):
-                        logger.info(f"<<< Received control message: {message}")
+                        # Don't log every message - only errors
                         if car_controller:
                             car_controller.process_control_message(message)
                     
