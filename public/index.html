@@ -464,27 +464,15 @@
                 
                 console.log('Control offer SDP:', offer.sdp);
                 
-                // Wait for ICE gathering
-                await new Promise((resolve) => {
-                    if (controlConnection.iceGatheringState === 'complete') {
-                        resolve();
-                    } else {
-                        const checkState = () => {
-                            if (controlConnection.iceGatheringState === 'complete') {
-                                controlConnection.removeEventListener('icegatheringstatechange', checkState);
-                                resolve();
-                            }
-                        };
-                        controlConnection.addEventListener('icegatheringstatechange', checkState);
-                    }
-                });
+                // DON'T wait for ICE gathering - Cloudflare example doesn't
+                // Send offer immediately after setLocalDescription
                 
                 console.log('Using Cloudflare Realtime /datachannels/establish API');
                 
                 const establishPayload = {
                     sessionDescription: {
                         type: 'offer',
-                        sdp: controlConnection.localDescription.sdp
+                        sdp: offer.sdp  // Use offer.sdp directly, not localDescription
                     },
                     dataChannel: {
                         location: 'local',
