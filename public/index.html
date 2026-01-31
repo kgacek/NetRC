@@ -436,6 +436,9 @@
 
                 // Add transceiver to receive video
                 peerConnection.addTransceiver('video', { direction: 'recvonly' });
+                
+                // Add transceiver for DataChannel (application type)
+                peerConnection.addTransceiver('application', { direction: 'sendonly' });
 
                 // Create offer
                 const offer = await peerConnection.createOffer();
@@ -457,8 +460,23 @@
                 });
 
                 console.log('Our SDP offer:', peerConnection.localDescription.sdp);
+                
+                // Extract mid for DataChannel (application track)
+                const sdpLines = peerConnection.localDescription.sdp.split('\n');
+                let applicationMid = null;
+                let currentMid = null;
+                for (const line of sdpLines) {
+                    if (line.startsWith('a=mid:')) {
+                        currentMid = line.split(':')[1].trim();
+                    } else if (line.startsWith('m=application') && currentMid) {
+                        applicationMid = currentMid;
+                        break;
+                    }
+                }
+                
+                console.log('DataChannel mid:', applicationMid);
 
-                // Pull track from RPi session into OUR session
+                // Pull video track from RPi session into OUR session
                 const pullResponse = await fetch(`https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${mySessionId}/tracks/new`, {
                     method: 'POST',
                     headers: {
@@ -504,6 +522,41 @@
                     updateStatus('Waiting for video stream...', 'success');
                 } else {
                     throw new Error('No session description in response');
+                }
+                
+                // Now push our DataChannel to RPi session so it can receive control commands
+                if (applicationMid) {
+                    console.log('Pushing DataChannel to RPi session...');
+                    const pushResponse = await fetch(`https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${rpiSessionId}/tracks/new`, {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': `Bearer ${appSecret}`,
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            sessionDescription: {
+                                type: 'offer',
+                                sdp: peerConnection.localDescription.sdp
+                            },
+                            tracks: [
+                                {
+                                    location: 'remote',
+                                    sessionId: mySessionId,
+                                    trackName: 'control',
+                                    mid: applicationMid
+                                }
+                            ]
+                        })
+                    });
+                    
+                    const pushText = await pushResponse.text();
+                    console.log('Push DataChannel response:', pushText);
+                    
+                    if (!pushResponse.ok) {
+                        console.warn('Failed to push DataChannel:', pushText);
+                    } else {
+                        console.log('DataChannel pushed successfully');
+                    }
                 }
 
             } catch (error) {
