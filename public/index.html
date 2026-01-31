@@ -613,6 +613,13 @@
                     steer: Math.round(steer)
                 });
                 controlChannel.send(command);
+                
+                // Debug: log every 20 sends (about 1 per second)
+                if (Math.random() < 0.05) {
+                    console.log('Sent control:', command);
+                }
+            } else if (controlChannel) {
+                console.log('Control channel state:', controlChannel.readyState);
             }
         }
         
