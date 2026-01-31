@@ -242,14 +242,16 @@ class CarController:
     def send_command(self, throttle, steer):
         """Send command to ESP32 via UART"""
         if not self.ser:
+            logger.warning("UART not available, cannot send command")
             return
         
         self.seq = (self.seq + 1) & 0xFFFF
-        cmd = f"T,{int(throttle)},{int(steer)},0,{self.seq}\\n"
+        cmd = f"T,{int(throttle)},{int(steer)},0,{self.seq}\n"
         
         try:
             self.ser.write(cmd.encode('ascii'))
             self.ser.flush()
+            logger.info(f"UART sent: {cmd.strip()}")
         except Exception as e:
             logger.error(f"UART send error: {e}")
     
@@ -264,8 +266,8 @@ class CarController:
             throttle = max(-300, min(300, throttle))
             steer = max(-1000, min(1000, steer))
             
+            logger.info(f"Processing control: throttle={throttle}, steer={steer}")
             self.send_command(throttle, steer)
-            logger.debug(f"Control: throttle={throttle}, steer={steer}")
             
         except json.JSONDecodeError:
             logger.warning(f"Invalid JSON in control message: {message}")
