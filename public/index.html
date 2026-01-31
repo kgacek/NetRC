@@ -481,6 +481,19 @@
                 
                 console.log('Using Cloudflare Realtime /datachannels/establish API');
                 
+                const establishPayload = {
+                    sessionDescription: {
+                        type: 'offer',
+                        sdp: controlConnection.localDescription.sdp
+                    },
+                    dataChannel: {
+                        location: 'local',
+                        dataChannelName: 'control'
+                    }
+                };
+                
+                console.log('Establish payload:', JSON.stringify(establishPayload, null, 2));
+                
                 // Use Cloudflare Realtime API to establish DataChannel
                 const dcResponse = await fetch(`https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${myControlSessionId}/datachannels/establish`, {
                     method: 'POST',
@@ -488,16 +501,7 @@
                         'Authorization': `Bearer ${appSecret}`,
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify({
-                        sessionDescription: {
-                            type: 'offer',
-                            sdp: controlConnection.localDescription.sdp
-                        },
-                        dataChannel: {
-                            location: 'local',
-                            dataChannelName: 'control'
-                        }
-                    })
+                    body: JSON.stringify(establishPayload)
                 });
                 
                 const dcText = await dcResponse.text();
