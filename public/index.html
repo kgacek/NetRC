@@ -464,75 +464,82 @@
                 
                 console.log('Control offer SDP:', offer.sdp);
                 
-                // DON'T wait for ICE gathering - Cloudflare example doesn't
-                // Send offer immediately after setLocalDescription
-                
-                console.log('Using Cloudflare Realtime /datachannels/establish API');
-                
-                const establishPayload = {
-                    sessionDescription: {
-                        type: 'offer',
-                        sdp: offer.sdp  // Use offer.sdp directly, not localDescription
-                    },
-                    dataChannel: {
-                        location: 'local',
-                        dataChannelName: 'control'
-                    }
-                };
-                
-                console.log('Establish payload:', JSON.stringify(establishPayload, null, 2));
-                
-                // Use Cloudflare Realtime API to establish DataChannel
-                const dcResponse = await fetch(`https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${myControlSessionId}/datachannels/establish`, {
-                    method: 'POST',
-                    headers: {
-                        'Authorization': `Bearer ${appSecret}`,
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify(establishPayload)
-                });
-                
-                const dcText = await dcResponse.text();
-                console.log('DataChannel establish response status:', dcResponse.status);
-                console.log('DataChannel establish response:', dcText);
-                
-                if (!dcResponse.ok) {
-                    throw new Error(`Failed to establish DataChannel: ${dcText}`);
-                }
-                
-                const dcData = JSON.parse(dcText);
-                
-                if (dcData.requiresImmediateRenegotiation) {
-                    // Got offer from Cloudflare, create answer
-                    await controlConnection.setRemoteDescription({
-                        type: dcData.sessionDescription.type,
-                        sdp: dcData.sessionDescription.sdp
-                    });
-                    
-                    const answer = await controlConnection.createAnswer();
-                    await controlConnection.setLocalDescription(answer);
-                    
-                    // Send answer
-                    await fetch(`https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${myControlSessionId}/renegotiate`, {
-                        method: 'PUT',
+                // First establish DataChannel transport (like Cloudflare example)
+                console.log('Establishing DataChannel transport...');
+                const establishResponse = await fetch(
+                    `https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${myControlSessionId}/datachannels/establish`,
+                    {
+                        method: 'POST',
                         headers: {
                             'Authorization': `Bearer ${appSecret}`,
                             'Content-Type': 'application/json'
                         },
                         body: JSON.stringify({
+                            dataChannel: {
+                                location: 'remote',
+                                dataChannelName: 'server-events'
+                            },
                             sessionDescription: {
-                                type: 'answer',
-                                sdp: controlConnection.localDescription.sdp
+                                type: 'offer',
+                                sdp: offer.sdp
                             }
                         })
-                    });
-                } else if (dcData.sessionDescription) {
-                    // Got answer directly
-                    await controlConnection.setRemoteDescription({
-                        type: dcData.sessionDescription.type,
-                        sdp: dcData.sessionDescription.sdp
-                    });
+                    }
+                );
+                
+                const establishData = await establishResponse.json();
+                console.log('Establish transport response:', establishData);
+                
+                if (!establishResponse.ok) {
+                    throw new Error(`Failed to establish transport: ${JSON.stringify(establishData)}`);
                 }
+                
+                if (establishData.requiresImmediateRenegotiation) {
+                    await controlConnection.setRemoteDescription(establishData.sessionDescription);
+                    const answer = await controlConnection.createAnswer();
+                    await controlConnection.setLocalDescription(answer);
+                    
+                    await fetch(
+                        `https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${myControlSessionId}/renegotiate`,
+                        {
+                            method: 'PUT',
+                            headers: {
+                                'Authorization': `Bearer ${appSecret}`,
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({
+                                sessionDescription: {
+                                    type: 'answer',
+                                    sdp: controlConnection.localDescription.sdp
+                                }
+                            })
+                        }
+                    );
+                } else if (establishData.sessionDescription) {
+                    await controlConnection.setRemoteDescription(establishData.sessionDescription);
+                }
+                
+                // Now create the actual control DataChannel using /datachannels/new
+                console.log('Creating control DataChannel...');
+                const dcNewResponse = await fetch(
+                    `https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${myControlSessionId}/datachannels/new`,
+                    {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': `Bearer ${appSecret}`,
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            dataChannels: [{
+                                location: 'local',
+                                dataChannelName: 'control'
+                            }]
+                        })
+                    }
+                );
+                
+                const dcNewData = await dcNewResponse.json();
+                console.log('DataChannel new response:', dcNewData);
                 
                 console.log('Control session ready:', myControlSessionId);
                 console.log('RPi should now pull from this session');
