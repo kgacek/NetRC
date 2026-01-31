@@ -523,6 +523,7 @@
                 
                 const dcNewData = await dcNewResponse.json();
                 console.log('DataChannel new response:', dcNewData);
+                console.log('Browser DataChannel ID from API:', dcNewData.dataChannels[0].id);
                 
                 if (!dcNewResponse.ok) {
                     throw new Error(`Failed to create DataChannel: ${JSON.stringify(dcNewData)}`);
