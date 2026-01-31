@@ -133,12 +133,37 @@
         <div id="status" class="status">
             Waiting to connect...
         </div>
+        
+        <div class="controls" style="margin-top: 20px; text-align: center; color: #888;">
+            <p><strong>Car Controls:</strong> W/S - Forward/Reverse | A/D - Left/Right | SPACE - Emergency Brake | R - Reset</p>
+        </div>
     </div>
 
     <script>
         let peerConnection = null;
+        let controlConnection = null;
+        let controlChannel = null;
         let mySessionId = null;
+        let myControlSessionId = null;
         let selectedSessionId = null;
+        
+        // Car control state
+        let throttle = 0;
+        let steer = 0;
+        let keys = {
+            'w': false,
+            's': false,
+            'a': false,
+            'd': false
+        };
+        
+        // Control parameters
+        const THROTTLE_ACCEL = 5;
+        const THROTTLE_DECEL = 20;
+        const STEER_SPEED = 70;
+        const STEER_RETURN_SPEED = 80;
+        const MAX_THROTTLE = 300;
+        const MAX_STEER = 1000;
 
         function updateStatus(message, type = 'info') {
             const statusEl = document.getElementById('status');
@@ -339,7 +364,10 @@
                         type: pullData.sessionDescription.type,
                         sdp: pullData.sessionDescription.sdp
                     });
-                    updateStatus('Waiting for video stream...', 'success');
+                    updateStatus('Video connected! Setting up control...', 'success');
+                    
+                    // Now setup control connection
+                    await setupControlConnection(appId, appSecret);
                 } else {
                     throw new Error('No session description in response');
                 }
@@ -356,6 +384,18 @@
         }
 
         function disconnect() {
+            stopControlLoop();
+            
+            if (controlChannel) {
+                controlChannel.close();
+                controlChannel = null;
+            }
+            
+            if (controlConnection) {
+                controlConnection.close();
+                controlConnection = null;
+            }
+            
             if (peerConnection) {
                 peerConnection.close();
                 peerConnection = null;
@@ -367,6 +407,218 @@
             document.getElementById('connectBtn').disabled = false;
             document.getElementById('disconnectBtn').disabled = true;
             updateStatus('Disconnected');
+        }
+        
+        // Car control functions
+        async function setupControlConnection(appId, appSecret) {
+            try {
+                updateStatus('Creating control session...', 'success');
+                
+                // Create OUR session for sending control
+                const createResponse = await fetch(`https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/new`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${appSecret}`,
+                        'Content-Type': 'application/json'
+                    }
+                });
+                
+                if (!createResponse.ok) {
+                    throw new Error(`Failed to create control session: ${createResponse.status}`);
+                }
+                
+                const sessionData = await createResponse.json();
+                myControlSessionId = sessionData.sessionId;
+                console.log('Created control session:', myControlSessionId);
+                
+                // Create peer connection for control
+                controlConnection = new RTCPeerConnection({
+                    iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }],
+                    bundlePolicy: 'max-bundle'
+                });
+                
+                // Create DataChannel for sending control commands
+                controlChannel = controlConnection.createDataChannel('control', {
+                    ordered: false,
+                    maxRetransmits: 0
+                });
+                
+                controlChannel.onopen = () => {
+                    console.log('Control DataChannel opened');
+                    updateStatus('Control ready! Use WASD to drive.', 'success');
+                    startControlLoop();
+                };
+                
+                controlChannel.onclose = () => {
+                    console.log('Control DataChannel closed');
+                    stopControlLoop();
+                };
+                
+                controlChannel.onerror = (error) => {
+                    console.error('DataChannel error:', error);
+                };
+                
+                // Create offer
+                const offer = await controlConnection.createOffer();
+                await controlConnection.setLocalDescription(offer);
+                
+                // Wait for ICE gathering
+                await new Promise((resolve) => {
+                    if (controlConnection.iceGatheringState === 'complete') {
+                        resolve();
+                    } else {
+                        const checkState = () => {
+                            if (controlConnection.iceGatheringState === 'complete') {
+                                controlConnection.removeEventListener('icegatheringstatechange', checkState);
+                                resolve();
+                            }
+                        };
+                        controlConnection.addEventListener('icegatheringstatechange', checkState);
+                    }
+                });
+                
+                // Find DataChannel mid in SDP
+                const sdpLines = controlConnection.localDescription.sdp.split('\n');
+                let dcMid = null;
+                let currentMid = null;
+                for (const line of sdpLines) {
+                    if (line.startsWith('a=mid:')) {
+                        currentMid = line.split(':')[1].trim();
+                    } else if (line.startsWith('m=application') && currentMid) {
+                        dcMid = currentMid;
+                        break;
+                    }
+                }
+                
+                console.log('DataChannel mid:', dcMid);
+                
+                // Push DataChannel track to OUR session
+                const pushResponse = await fetch(`https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${myControlSessionId}/tracks/new`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${appSecret}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        sessionDescription: {
+                            type: 'offer',
+                            sdp: controlConnection.localDescription.sdp
+                        },
+                        tracks: [
+                            {
+                                location: 'local',
+                                trackName: 'control',
+                                mid: dcMid
+                            }
+                        ]
+                    })
+                });
+                
+                if (!pushResponse.ok) {
+                    throw new Error(`Failed to push control track: ${await pushResponse.text()}`);
+                }
+                
+                const pushData = await pushResponse.json();
+                console.log('Control push response:', pushData);
+                
+                if (pushData.sessionDescription) {
+                    await controlConnection.setRemoteDescription({
+                        type: pushData.sessionDescription.type,
+                        sdp: pushData.sessionDescription.sdp
+                    });
+                }
+                
+                console.log('Control session ready:', myControlSessionId);
+                
+            } catch (error) {
+                console.error('Control setup error:', error);
+                updateStatus(`Control setup failed: ${error.message}`, 'error');
+            }
+        }
+        
+        function updateCarControl() {
+            // === THROTTLE ===
+            if (keys['w'] && !keys['s']) {
+                throttle = Math.max(throttle - THROTTLE_ACCEL - 40, -MAX_THROTTLE);
+            } else if (keys['s'] && !keys['w']) {
+                throttle = Math.min(40 + throttle + THROTTLE_ACCEL, MAX_THROTTLE);
+            } else {
+                if (throttle > 0) {
+                    throttle = Math.max(0, throttle - THROTTLE_DECEL);
+                } else if (throttle < 0) {
+                    throttle = Math.min(0, throttle + THROTTLE_DECEL);
+                }
+            }
+            
+            // === STEERING ===
+            if (keys['a'] && !keys['d']) {
+                steer = Math.min(steer + STEER_SPEED, MAX_STEER);
+            } else if (keys['d'] && !keys['a']) {
+                steer = Math.max(steer - STEER_SPEED, -MAX_STEER);
+            } else {
+                if (steer > 0) {
+                    steer = Math.max(0, steer - STEER_RETURN_SPEED);
+                } else if (steer < 0) {
+                    steer = Math.min(0, steer + STEER_RETURN_SPEED);
+                }
+            }
+            
+            // Send control command via DataChannel
+            if (controlChannel && controlChannel.readyState === 'open') {
+                const command = JSON.stringify({
+                    throttle: Math.round(throttle),
+                    steer: Math.round(steer)
+                });
+                controlChannel.send(command);
+            }
+        }
+        
+        function handleKeyDown(e) {
+            const key = e.key.toLowerCase();
+            if (key === 'w') keys['w'] = true;
+            else if (key === 's') keys['s'] = true;
+            else if (key === 'a') keys['a'] = true;
+            else if (key === 'd') keys['d'] = true;
+            else if (key === ' ') {
+                e.preventDefault();
+                throttle = 0;
+                steer = 0;
+                keys = { 'w': false, 's': false, 'a': false, 'd': false };
+            } else if (key === 'r') {
+                throttle = 0;
+                steer = 0;
+                keys = { 'w': false, 's': false, 'a': false, 'd': false };
+            }
+        }
+        
+        function handleKeyUp(e) {
+            const key = e.key.toLowerCase();
+            if (key === 'w') keys['w'] = false;
+            else if (key === 's') keys['s'] = false;
+            else if (key === 'a') keys['a'] = false;
+            else if (key === 'd') keys['d'] = false;
+        }
+        
+        let controlLoopInterval = null;
+        function startControlLoop() {
+            if (controlLoopInterval) return;
+            controlLoopInterval = setInterval(() => {
+                updateCarControl();
+            }, 20); // 50Hz
+            window.addEventListener('keydown', handleKeyDown);
+            window.addEventListener('keyup', handleKeyUp);
+        }
+        
+        function stopControlLoop() {
+            if (controlLoopInterval) {
+                clearInterval(controlLoopInterval);
+                controlLoopInterval = null;
+            }
+            window.removeEventListener('keydown', handleKeyDown);
+            window.removeEventListener('keyup', handleKeyUp);
+            throttle = 0;
+            steer = 0;
+            keys = { 'w': false, 's': false, 'a': false, 'd': false };
         }
 
         window.addEventListener('beforeunload', disconnect);

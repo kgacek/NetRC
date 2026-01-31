@@ -9,6 +9,8 @@ import aiohttp
 import json
 from fractions import Fraction
 import time
+import serial
+import serial.tools.list_ports
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -24,6 +26,10 @@ H=480
 
 # Signaling server configuration
 SIGNALING_SERVER = os.getenv('SIGNALING_SERVER', 'https://79-76-127-159.nip.io')
+
+# UART configuration for car control
+UART_DEV = os.getenv('UART_DEV', '/dev/ttyS0')
+UART_BAUD = int(os.getenv('UART_BAUD', '115200'))
 
 class PiCameraTrack(VideoStreamTrack):
     """
@@ -209,15 +215,169 @@ async def register_session(session_id):
     except Exception as e:
         logger.warning(f"Could not connect to signaling server: {e}")
 
+
+class CarController:
+    """
+    Controls the RC car via UART based on commands from DataChannel
+    """
+    def __init__(self, uart_dev=UART_DEV, uart_baud=UART_BAUD):
+        self.uart_dev = uart_dev
+        self.uart_baud = uart_baud
+        self.ser = None
+        self.seq = 0
+        
+    def init_uart(self):
+        """Initialize UART connection"""
+        try:
+            self.ser = serial.Serial(self.uart_dev, self.uart_baud, timeout=0.1)
+            logger.info(f"UART initialized: {self.uart_dev} @ {self.uart_baud}")
+            time.sleep(0.2)
+            self.ser.reset_input_buffer()
+            self.ser.reset_output_buffer()
+            return True
+        except Exception as e:
+            logger.warning(f"UART not available: {e}. Running in video-only mode.")
+            return False
+    
+    def send_command(self, throttle, steer):
+        """Send command to ESP32 via UART"""
+        if not self.ser:
+            return
+        
+        self.seq = (self.seq + 1) & 0xFFFF
+        cmd = f"T,{int(throttle)},{int(steer)},0,{self.seq}\\n"
+        
+        try:
+            self.ser.write(cmd.encode('ascii'))
+            self.ser.flush()
+        except Exception as e:
+            logger.error(f"UART send error: {e}")
+    
+    def process_control_message(self, message):
+        """Process control message from DataChannel"""
+        try:
+            data = json.loads(message)
+            throttle = int(data.get('throttle', 0))
+            steer = int(data.get('steer', 0))
+            
+            # Clamp values to safe ranges
+            throttle = max(-300, min(300, throttle))
+            steer = max(-1000, min(1000, steer))
+            
+            self.send_command(throttle, steer)
+            logger.debug(f"Control: throttle={throttle}, steer={steer}")
+            
+        except json.JSONDecodeError:
+            logger.warning(f"Invalid JSON in control message: {message}")
+        except Exception as e:
+            logger.error(f"Error processing control message: {e}")
+    
+    def stop(self):
+        """Stop the car and close UART"""
+        if self.ser:
+            self.send_command(0, 0)
+            time.sleep(0.1)
+            self.ser.close()
+            logger.info("UART closed")
+
+
+async def run_control_subscriber(car_controller, control_session_id):
+    """
+    Separate PeerConnection to receive control DataChannel from browser
+    """
+    try:
+        logger.info(f"Setting up control subscriber for session: {control_session_id}")
+        
+        # Create peer connection for receiving control
+        pc_control = RTCPeerConnection(
+            configuration=RTCConfiguration(
+                iceServers=[RTCIceServer(urls=['stun:stun.cloudflare.com:3478'])]
+            )
+        )
+        
+        # Handle incoming DataChannel from browser
+        @pc_control.on('datachannel')
+        def on_datachannel(channel):
+            logger.info(f"Control DataChannel received: {channel.label}")
+            
+            @channel.on('message')
+            def on_message(message):
+                if car_controller:
+                    car_controller.process_control_message(message)
+            
+            @channel.on('close')
+            def on_close():
+                logger.info("Control DataChannel closed")
+                if car_controller:
+                    car_controller.send_command(0, 0)
+        
+        # Pull control DataChannel from browser session
+        url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/{control_session_id}/tracks/new"
+        headers = {
+            'Authorization': f'Bearer {CLOUDFLARE_APP_SECRET}',
+            'Content-Type': 'application/json'
+        }
+        
+        # Create offer
+        offer = await pc_control.createOffer()
+        await pc_control.setLocalDescription(offer)
+        
+        # Wait for ICE gathering
+        while pc_control.iceGatheringState != 'complete':
+            await asyncio.sleep(0.1)
+        
+        # Send offer to pull control track
+        payload = {
+            'sessionDescription': {
+                'type': 'offer',
+                'sdp': pc_control.localDescription.sdp
+            },
+            'tracks': [
+                {
+                    'location': 'remote',
+                    'sessionId': control_session_id,
+                    'trackName': 'control',
+                    'mid': '0'
+                }
+            ]
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=payload) as response:
+                if response.status in [200, 201]:
+                    data = await response.json()
+                    if 'sessionDescription' in data:
+                        await pc_control.setRemoteDescription(RTCSessionDescription(
+                            sdp=data['sessionDescription']['sdp'],
+                            type=data['sessionDescription']['type']
+                        ))
+                        logger.info("Control connection established")
+                else:
+                    logger.error(f"Failed to setup control connection: {await response.text()}")
+                    return None
+        
+        return pc_control
+        
+    except Exception as e:
+        logger.error(f"Error in control subscriber: {e}", exc_info=True)
+        return None
+
 async def run_stream():
     """
     Main function to stream video from Pi Camera
     """
+    car_controller = None
+    pc_control = None
+    
     try:
-        # Create session
-        logger.info("Creating Cloudflare session...")
+        # Initialize car controller
+        car_controller = CarController()
+        car_controller.init_uart()
+        
+        # Create session for video
+        logger.info("Creating Cloudflare session for video...")
         session_id = await create_session()
-        logger.info(f"Session created: {session_id}")
+        logger.info(f"Video session created: {session_id}")
         
         # Register with signaling server
         await register_session(session_id)
@@ -269,6 +429,9 @@ async def run_stream():
         logger.info("Streaming started! Press Ctrl+C to stop.")
         logger.info(f"Track published with name: camera")
         
+        logger.info("Waiting for browser to provide control session ID...")
+        logger.info("Browser should create a control session and send it to signaling server")
+        
         # Keep running
         try:
             while True:
@@ -282,10 +445,19 @@ async def run_stream():
         # Cleanup
         camera_track.stop()
         await pc.close()
+        
+        if pc_control:
+            await pc_control.close()
+        
+        if car_controller:
+            car_controller.stop()
+        
         logger.info("Stream stopped")
         
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
+        if car_controller:
+            car_controller.stop()
         sys.exit(1)
 
 
