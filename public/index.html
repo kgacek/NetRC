@@ -553,10 +553,8 @@
                     console.error('DataChannel error:', error);
                 };
                 
-                console.log('Control session ready:', myControlSessionId);
-                console.log('RPi should now pull from this session');
-                
-                // Register control session with signaling server
+                // IMPORTANT: Register control session with signaling server FIRST
+                // so RPi can start subscribing before we finish
                 const signalingServer = document.getElementById('signalingServer').value;
                 if (signalingServer) {
                     try {
@@ -573,6 +571,9 @@
                         console.warn('Could not register control session:', e);
                     }
                 }
+                
+                console.log('Control session ready:', myControlSessionId);
+                console.log('Waiting for RPi to subscribe...');
                 
             } catch (error) {
                 console.error('Control setup error:', error);
