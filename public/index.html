@@ -479,70 +479,43 @@
                     }
                 });
                 
-                // Find DataChannel mid in SDP - it's in m=application line
-                const sdpLines = controlConnection.localDescription.sdp.split('\r\n');
-                let dcMid = null;
+                console.log('Using Cloudflare Realtime /datachannels/new API');
                 
-                for (let i = 0; i < sdpLines.length; i++) {
-                    const line = sdpLines[i];
-                    if (line.startsWith('m=application')) {
-                        // Look for a=mid: in the next lines
-                        for (let j = i + 1; j < sdpLines.length && !sdpLines[j].startsWith('m='); j++) {
-                            if (sdpLines[j].startsWith('a=mid:')) {
-                                dcMid = sdpLines[j].substring(6).trim();
-                                break;
-                            }
-                        }
-                        break;
-                    }
-                }
-                
-                console.log('DataChannel mid:', dcMid);
-                
-                if (!dcMid) {
-                    throw new Error('Could not find DataChannel mid in SDP');
-                }
-                
-                // Push DataChannel track to OUR session
-                const pushPayload = {
-                    sessionDescription: {
-                        type: 'offer',
-                        sdp: controlConnection.localDescription.sdp
-                    },
-                    tracks: [
-                        {
-                            location: 'local',
-                            trackName: 'control',
-                            mid: dcMid
-                        }
-                    ]
-                };
-                
-                console.log('Pushing control track with payload:', JSON.stringify(pushPayload, null, 2));
-                
-                const pushResponse = await fetch(`https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${myControlSessionId}/tracks/new`, {
+                // Use Cloudflare Realtime API to create DataChannel
+                const dcResponse = await fetch(`https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${myControlSessionId}/datachannels/new`, {
                     method: 'POST',
                     headers: {
                         'Authorization': `Bearer ${appSecret}`,
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify(pushPayload)
+                    body: JSON.stringify({
+                        sessionDescription: {
+                            type: 'offer',
+                            sdp: controlConnection.localDescription.sdp
+                        },
+                        dataChannels: [
+                            {
+                                location: 'local',
+                                dataChannelName: 'control'
+                            }
+                        ]
+                    })
                 });
                 
-                const pushText = await pushResponse.text();
-                console.log('Control push response status:', pushResponse.status);
-                console.log('Control push response:', pushText);
+                const dcText = await dcResponse.text();
+                console.log('DataChannel creation response status:', dcResponse.status);
+                console.log('DataChannel creation response:', dcText);
                 
-                if (!pushResponse.ok) {
-                    throw new Error(`Failed to push control track: ${pushText}`);
+                if (!dcResponse.ok) {
+                    throw new Error(`Failed to create DataChannel: ${dcText}`);
                 }
                 
-                const pushData = JSON.parse(pushText);
+                const dcData = JSON.parse(dcText);
                 
-                if (pushData.sessionDescription) {
+                if (dcData.sessionDescription) {
                     await controlConnection.setRemoteDescription({
-                        type: pushData.sessionDescription.type,
-                        sdp: pushData.sessionDescription.sdp
+                        type: dcData.sessionDescription.type,
+                        sdp: dcData.sessionDescription.sdp
                     });
                 }
                 

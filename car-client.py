@@ -311,16 +311,22 @@ async def run_control_subscriber(car_controller, control_session_id):
                 if car_controller:
                     car_controller.send_command(0, 0)
         
-        # Add dummy audio transceiver just to create valid offer
-        # (aiortc requires at least one media or datachannel to create offer)
-        pc_control.addTransceiver('audio', direction='recvonly')
-        
-        # Pull control DataChannel from browser session
-        url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/{control_session_id}/tracks/new"
+        # Use Cloudflare Realtime API to pull DataChannel
+        url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/new"
         headers = {
             'Authorization': f'Bearer {CLOUDFLARE_APP_SECRET}',
             'Content-Type': 'application/json'
         }
+        
+        # Create our own session
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers) as response:
+                if response.status != 201:
+                    logger.error(f"Failed to create subscriber session: {await response.text()}")
+                    return None
+                data = await response.json()
+                subscriber_session_id = data['sessionId']
+                logger.info(f"Created subscriber session: {subscriber_session_id}")
         
         # Create offer
         offer = await pc_control.createOffer()
@@ -330,49 +336,42 @@ async def run_control_subscriber(car_controller, control_session_id):
         while pc_control.iceGatheringState != 'complete':
             await asyncio.sleep(0.1)
         
-        # Send offer to pull control track
+        # Pull control DataChannel from browser session
+        url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/{subscriber_session_id}/datachannels/new"
         payload = {
             'sessionDescription': {
                 'type': 'offer',
                 'sdp': pc_control.localDescription.sdp
             },
-            'tracks': [
+            'dataChannels': [
                 {
                     'location': 'remote',
                     'sessionId': control_session_id,
-                    'trackName': 'control',
-                    'mid': '0'  # DataChannel should be at mid 0 in browser session
+                    'dataChannelName': 'control'
                 }
             ]
         }
         
-        logger.debug(f"Pulling control with payload: {json.dumps(payload, indent=2)}")
+        logger.info(f"Pulling DataChannel from session {control_session_id}")
         
         async with aiohttp.ClientSession() as session:
             async with session.post(url, headers=headers, json=payload) as response:
                 response_text = await response.text()
-                logger.info(f"Control pull response ({response.status}): {response_text}")
+                logger.info(f"DataChannel pull response: {response_text}")
                 
                 if response.status in [200, 201]:
                     data = json.loads(response_text)
-                    
-                    # Check for track errors
-                    if 'tracks' in data:
-                        for track in data['tracks']:
-                            if 'errorCode' in track:
-                                logger.error(f"Track error: {track}")
-                                return None
-                    
                     if 'sessionDescription' in data:
                         await pc_control.setRemoteDescription(RTCSessionDescription(
                             sdp=data['sessionDescription']['sdp'],
                             type=data['sessionDescription']['type']
                         ))
-                        logger.info("Control connection established - waiting for DataChannel")
+                        logger.info("Control DataChannel connection established")
                     else:
-                        logger.warning("No sessionDescription in control response")
+                        logger.error("No sessionDescription in response")
+                        return None
                 else:
-                    logger.error(f"Failed to setup control connection: {response_text}")
+                    logger.error(f"Failed to pull DataChannel: {response_text}")
                     return None
         
         return pc_control
