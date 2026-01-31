@@ -414,6 +414,7 @@
                 };
                 
                 // Create DataChannel for sending control commands
+                // DataChannel is included automatically in SDP when created
                 controlChannel = peerConnection.createDataChannel('control', {
                     ordered: false,
                     maxRetransmits: 0
@@ -436,9 +437,6 @@
 
                 // Add transceiver to receive video
                 peerConnection.addTransceiver('video', { direction: 'recvonly' });
-                
-                // Add transceiver for DataChannel (application type)
-                peerConnection.addTransceiver('application', { direction: 'sendonly' });
 
                 // Create offer
                 const offer = await peerConnection.createOffer();
@@ -460,21 +458,6 @@
                 });
 
                 console.log('Our SDP offer:', peerConnection.localDescription.sdp);
-                
-                // Extract mid for DataChannel (application track)
-                const sdpLines = peerConnection.localDescription.sdp.split('\n');
-                let applicationMid = null;
-                let currentMid = null;
-                for (const line of sdpLines) {
-                    if (line.startsWith('a=mid:')) {
-                        currentMid = line.split(':')[1].trim();
-                    } else if (line.startsWith('m=application') && currentMid) {
-                        applicationMid = currentMid;
-                        break;
-                    }
-                }
-                
-                console.log('DataChannel mid:', applicationMid);
 
                 // Pull video track from RPi session into OUR session
                 const pullResponse = await fetch(`https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${mySessionId}/tracks/new`, {
@@ -519,16 +502,31 @@
                         type: pullData.sessionDescription.type,
                         sdp: pullData.sessionDescription.sdp
                     });
-                    updateStatus('Waiting for video stream...', 'success');
-                } else {
-                    throw new Error('No session description in response');
-                }
-                
-                // Now push our DataChannel to RPi session so it can receive control commands
-                if (applicationMid) {
-                    console.log('Pushing DataChannel to RPi session...');
-                    const pushResponse = await fetch(`https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${rpiSessionId}/tracks/new`, {
-                        method: 'POST',
+                    
+                    // Now renegotiate to push DataChannel to RPi
+                    // Create a new offer that includes our DataChannel
+                    console.log('Renegotiating to add DataChannel...');
+                    const newOffer = await peerConnection.createOffer();
+                    await peerConnection.setLocalDescription(newOffer);
+                    
+                    // Wait for ICE gathering again
+                    await new Promise((resolve) => {
+                        if (peerConnection.iceGatheringState === 'complete') {
+                            resolve();
+                        } else {
+                            const checkState = () => {
+                                if (peerConnection.iceGatheringState === 'complete') {
+                                    peerConnection.removeEventListener('icegatheringstatechange', checkState);
+                                    resolve();
+                                }
+                            };
+                            peerConnection.addEventListener('icegatheringstatechange', checkState);
+                        }
+                    });
+                    
+                    // Push the updated SDP with DataChannel to RPi session
+                    const renegotiateResponse = await fetch(`https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${rpiSessionId}/renegotiate`, {
+                        method: 'PUT',
                         headers: {
                             'Authorization': `Bearer ${appSecret}`,
                             'Content-Type': 'application/json'
@@ -537,26 +535,27 @@
                             sessionDescription: {
                                 type: 'offer',
                                 sdp: peerConnection.localDescription.sdp
-                            },
-                            tracks: [
-                                {
-                                    location: 'remote',
-                                    sessionId: mySessionId,
-                                    trackName: 'control',
-                                    mid: applicationMid
-                                }
-                            ]
+                            }
                         })
                     });
                     
-                    const pushText = await pushResponse.text();
-                    console.log('Push DataChannel response:', pushText);
-                    
-                    if (!pushResponse.ok) {
-                        console.warn('Failed to push DataChannel:', pushText);
+                    if (renegotiateResponse.ok) {
+                        const renegotiateData = await renegotiateResponse.json();
+                        console.log('Renegotiation response:', renegotiateData);
+                        
+                        if (renegotiateData.sessionDescription) {
+                            await peerConnection.setRemoteDescription({
+                                type: renegotiateData.sessionDescription.type,
+                                sdp: renegotiateData.sessionDescription.sdp
+                            });
+                        }
                     } else {
-                        console.log('DataChannel pushed successfully');
+                        console.warn('Renegotiation failed:', await renegotiateResponse.text());
                     }
+                    
+                    updateStatus('Waiting for video stream...', 'success');
+                } else {
+                    throw new Error('No session description in response');
                 }
 
             } catch (error) {
