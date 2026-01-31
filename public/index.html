@@ -479,10 +479,10 @@
                     }
                 });
                 
-                console.log('Using Cloudflare Realtime /datachannels/new API');
+                console.log('Using Cloudflare Realtime /datachannels/establish API');
                 
-                // Use Cloudflare Realtime API to create DataChannel
-                const dcResponse = await fetch(`https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${myControlSessionId}/datachannels/new`, {
+                // Use Cloudflare Realtime API to establish DataChannel
+                const dcResponse = await fetch(`https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${myControlSessionId}/datachannels/establish`, {
                     method: 'POST',
                     headers: {
                         'Authorization': `Bearer ${appSecret}`,
@@ -493,26 +493,49 @@
                             type: 'offer',
                             sdp: controlConnection.localDescription.sdp
                         },
-                        dataChannels: [
-                            {
-                                location: 'local',
-                                dataChannelName: 'control'
-                            }
-                        ]
+                        dataChannel: {
+                            location: 'local',
+                            dataChannelName: 'control'
+                        }
                     })
                 });
                 
                 const dcText = await dcResponse.text();
-                console.log('DataChannel creation response status:', dcResponse.status);
-                console.log('DataChannel creation response:', dcText);
+                console.log('DataChannel establish response status:', dcResponse.status);
+                console.log('DataChannel establish response:', dcText);
                 
                 if (!dcResponse.ok) {
-                    throw new Error(`Failed to create DataChannel: ${dcText}`);
+                    throw new Error(`Failed to establish DataChannel: ${dcText}`);
                 }
                 
                 const dcData = JSON.parse(dcText);
                 
-                if (dcData.sessionDescription) {
+                if (dcData.requiresImmediateRenegotiation) {
+                    // Got offer from Cloudflare, create answer
+                    await controlConnection.setRemoteDescription({
+                        type: dcData.sessionDescription.type,
+                        sdp: dcData.sessionDescription.sdp
+                    });
+                    
+                    const answer = await controlConnection.createAnswer();
+                    await controlConnection.setLocalDescription(answer);
+                    
+                    // Send answer
+                    await fetch(`https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${myControlSessionId}/renegotiate`, {
+                        method: 'PUT',
+                        headers: {
+                            'Authorization': `Bearer ${appSecret}`,
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            sessionDescription: {
+                                type: 'answer',
+                                sdp: controlConnection.localDescription.sdp
+                            }
+                        })
+                    });
+                } else if (dcData.sessionDescription) {
+                    // Got answer directly
                     await controlConnection.setRemoteDescription({
                         type: dcData.sessionDescription.type,
                         sdp: dcData.sessionDescription.sdp
