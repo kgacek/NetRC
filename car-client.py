@@ -425,6 +425,7 @@ async def run_control_subscriber(car_controller, control_session_id):
                     
                     @control_dc.on('message')
                     def on_message(message):
+                        logger.info(f"Received control message: {message}")
                         if car_controller:
                             car_controller.process_control_message(message)
                     
