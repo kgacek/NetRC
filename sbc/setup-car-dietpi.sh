@@ -130,7 +130,8 @@ pip install \
     aiortc>=1.6.0 \
     aiohttp>=3.9.0 \
     av>=10.0.0 \
-    numpy>=1.24.0
+    numpy>=1.24.0 \
+    pyserial>=3.5
 
 # Note: picamera2 is already installed system-wide, link it to venv
 echo "Linking system picamera2 to virtual environment..."

@@ -133,12 +133,35 @@
         <div id="status" class="status">
             Waiting to connect...
         </div>
+        
+        <div class="controls" style="margin-top: 20px; text-align: center; color: #888;">
+            <p><strong>Car Controls:</strong> W/S - Forward/Reverse | A/D - Left/Right | SPACE - Emergency Brake | R - Reset</p>
+        </div>
     </div>
 
     <script>
         let peerConnection = null;
         let mySessionId = null;
         let selectedSessionId = null;
+        let controlChannel = null;
+        
+        // Car control state
+        let throttle = 0;
+        let steer = 0;
+        let keys = {
+            'w': false,
+            's': false,
+            'a': false,
+            'd': false
+        };
+        
+        // Control parameters
+        const THROTTLE_ACCEL = 5;
+        const THROTTLE_DECEL = 20;
+        const STEER_SPEED = 70;
+        const STEER_RETURN_SPEED = 80;
+        const MAX_THROTTLE = 300;
+        const MAX_STEER = 1000;
 
         function updateStatus(message, type = 'info') {
             const statusEl = document.getElementById('status');
@@ -208,6 +231,124 @@
             
             updateStatus('Session selected. Click Connect to start streaming.', 'success');
         }
+        
+        // Car control functions
+        function updateCarControl() {
+            // === THROTTLE ===
+            if (keys['w'] && !keys['s']) {
+                throttle = Math.max(throttle - THROTTLE_ACCEL - 40, -MAX_THROTTLE);
+            } else if (keys['s'] && !keys['w']) {
+                throttle = Math.min(40 + throttle + THROTTLE_ACCEL, MAX_THROTTLE);
+            } else {
+                // Decelerate to zero
+                if (throttle > 0) {
+                    throttle = Math.max(0, throttle - THROTTLE_DECEL);
+                } else if (throttle < 0) {
+                    throttle = Math.min(0, throttle + THROTTLE_DECEL);
+                }
+            }
+            
+            // === STEERING ===
+            if (keys['a'] && !keys['d']) {
+                steer = Math.min(steer + STEER_SPEED, MAX_STEER);
+            } else if (keys['d'] && !keys['a']) {
+                steer = Math.max(steer - STEER_SPEED, -MAX_STEER);
+            } else {
+                // Return to center
+                if (steer > 0) {
+                    steer = Math.max(0, steer - STEER_RETURN_SPEED);
+                } else if (steer < 0) {
+                    steer = Math.min(0, steer + STEER_RETURN_SPEED);
+                }
+            }
+            
+            // Send control command via DataChannel
+            if (controlChannel && controlChannel.readyState === 'open') {
+                const command = JSON.stringify({
+                    throttle: Math.round(throttle),
+                    steer: Math.round(steer)
+                });
+                controlChannel.send(command);
+            }
+        }
+        
+        // Keyboard event handlers
+        function handleKeyDown(e) {
+            const key = e.key.toLowerCase();
+            
+            if (key === 'w') keys['w'] = true;
+            else if (key === 's') keys['s'] = true;
+            else if (key === 'a') keys['a'] = true;
+            else if (key === 'd') keys['d'] = true;
+            else if (key === ' ') {
+                e.preventDefault();
+                // Emergency brake
+                throttle = 0;
+                steer = 0;
+                keys = { 'w': false, 's': false, 'a': false, 'd': false };
+            } else if (key === 'r') {
+                // Reset
+                throttle = 0;
+                steer = 0;
+                keys = { 'w': false, 's': false, 'a': false, 'd': false };
+            }
+        }
+        
+        function handleKeyUp(e) {
+            const key = e.key.toLowerCase();
+            
+            if (key === 'w') keys['w'] = false;
+            else if (key === 's') keys['s'] = false;
+            else if (key === 'a') keys['a'] = false;
+            else if (key === 'd') keys['d'] = false;
+        }
+        
+        // Start control loop
+        let controlLoopInterval = null;
+        function startControlLoop() {
+            if (controlLoopInterval) return;
+            
+            controlLoopInterval = setInterval(() => {
+                updateCarControl();
+                updateControlHUD();
+            }, 20); // 50Hz
+            
+            // Add keyboard listeners
+            window.addEventListener('keydown', handleKeyDown);
+            window.addEventListener('keyup', handleKeyUp);
+        }
+        
+        function stopControlLoop() {
+            if (controlLoopInterval) {
+                clearInterval(controlLoopInterval);
+                controlLoopInterval = null;
+            }
+            
+            window.removeEventListener('keydown', handleKeyDown);
+            window.removeEventListener('keyup', handleKeyUp);
+            
+            // Reset state
+            throttle = 0;
+            steer = 0;
+            keys = { 'w': false, 's': false, 'a': false, 'd': false };
+        }
+        
+        function updateControlHUD() {
+            const statusEl = document.getElementById('status');
+            
+            const thrLabel = throttle > 0 ? 'FWD' : throttle < 0 ? 'REV' : '---';
+            const keyW = keys['w'] ? '▲' : '△';
+            const keyS = keys['s'] ? '▼' : '▽';
+            const keyA = keys['a'] ? '◄' : '◁';
+            const keyD = keys['d'] ? '►' : '▷';
+            
+            const channelStatus = controlChannel && controlChannel.readyState === 'open' ? '🟢' : '🔴';
+            
+            statusEl.innerHTML = `
+                ${channelStatus} Control: [${thrLabel}] Throttle: ${throttle.toFixed(0).padStart(4)} | Steer: ${steer.toFixed(0).padStart(5)} | Keys: [${keyW}${keyS}${keyA}${keyD}]
+            `;
+            statusEl.className = 'status success';
+        }
 
         async function connect() {
             const appId = document.getElementById('appId').value.trim();
@@ -263,13 +404,34 @@
                     console.log(`Connection state: ${peerConnection.connectionState}`);
                     updateStatus(`Connection state: ${peerConnection.connectionState}`);
                     if (peerConnection.connectionState === 'connected') {
-                        updateStatus('Connected! Streaming video...', 'success');
+                        updateStatus('Connected! Stream active. Use WASD to control.', 'success');
                         document.getElementById('disconnectBtn').disabled = false;
                     } else if (peerConnection.connectionState === 'failed' || 
-                               peerConnection.connectionState === 'disconnected') {
-                        updateStatus('Connection lost', 'error');
+                               peerConnection.connectionState === 'closed') {
+                        updateStatus('Connection failed or closed', 'error');
                         disconnect();
                     }
+                };
+                
+                // Create DataChannel for sending control commands
+                controlChannel = peerConnection.createDataChannel('control', {
+                    ordered: false,
+                    maxRetransmits: 0
+                });
+                
+                controlChannel.onopen = () => {
+                    logger.info('Control DataChannel opened');
+                    updateStatus('Control channel ready! Use WASD to control car.', 'success');
+                    startControlLoop();
+                };
+                
+                controlChannel.onclose = () => {
+                    console.log('Control DataChannel closed');
+                    stopControlLoop();
+                };
+                
+                controlChannel.onerror = (error) => {
+                    console.error('DataChannel error:', error);
                 };
 
                 // Add transceiver to receive video
@@ -356,6 +518,13 @@
         }
 
         function disconnect() {
+            stopControlLoop();
+            
+            if (controlChannel) {
+                controlChannel.close();
+                controlChannel = null;
+            }
+            
             if (peerConnection) {
                 peerConnection.close();
                 peerConnection = null;
