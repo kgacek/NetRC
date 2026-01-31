@@ -328,21 +328,9 @@ async def run_control_subscriber(car_controller, control_session_id):
                 subscriber_session_id = data['sessionId']
                 logger.info(f"Created subscriber session: {subscriber_session_id}")
         
-        # Create offer
-        offer = await pc_control.createOffer()
-        await pc_control.setLocalDescription(offer)
-        
-        # Wait for ICE gathering
-        while pc_control.iceGatheringState != 'complete':
-            await asyncio.sleep(0.1)
-        
-        # Pull control DataChannel from browser session
+        # Pull control DataChannel from browser session - Cloudflare returns offer
         url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/{subscriber_session_id}/datachannels/new"
         payload = {
-            'sessionDescription': {
-                'type': 'offer',
-                'sdp': pc_control.localDescription.sdp
-            },
             'dataChannels': [
                 {
                     'location': 'remote',
@@ -362,11 +350,37 @@ async def run_control_subscriber(car_controller, control_session_id):
                 if response.status in [200, 201]:
                     data = json.loads(response_text)
                     if 'sessionDescription' in data:
+                        # Cloudflare sends us offer, we create answer
                         await pc_control.setRemoteDescription(RTCSessionDescription(
                             sdp=data['sessionDescription']['sdp'],
                             type=data['sessionDescription']['type']
                         ))
-                        logger.info("Control DataChannel connection established")
+                        logger.info(f"Received offer from Cloudflare, creating answer")
+                        
+                        # Create answer
+                        answer = await pc_control.createAnswer()
+                        await pc_control.setLocalDescription(answer)
+                        
+                        # Wait for ICE gathering
+                        while pc_control.iceGatheringState != 'complete':
+                            await asyncio.sleep(0.1)
+                        
+                        # Send answer back to Cloudflare
+                        answer_url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/{subscriber_session_id}/renegotiate"
+                        answer_payload = {
+                            'sessionDescription': {
+                                'type': 'answer',
+                                'sdp': pc_control.localDescription.sdp
+                            }
+                        }
+                        
+                        async with aiohttp.ClientSession() as answer_session:
+                            async with answer_session.put(answer_url, headers=headers, json=answer_payload) as answer_response:
+                                if answer_response.status in [200, 201]:
+                                    logger.info("Control DataChannel connection established")
+                                else:
+                                    logger.error(f"Failed to send answer: {await answer_response.text()}")
+                                    return None
                     else:
                         logger.error("No sessionDescription in response")
                         return None
