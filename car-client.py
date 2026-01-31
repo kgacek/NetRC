@@ -328,22 +328,21 @@ async def run_control_subscriber(car_controller, control_session_id):
                 subscriber_session_id = data['sessionId']
                 logger.info(f"Created subscriber session: {subscriber_session_id}")
         
-        # Establish DataChannel connection to browser's control datachannel
+        # Step 1: Establish DataChannel transport (like Cloudflare example)
         establish_url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/{subscriber_session_id}/datachannels/establish"
-        payload = {
+        establish_payload = {
             'dataChannel': {
                 'location': 'remote',
-                'sessionId': control_session_id,
-                'dataChannelName': 'control'
+                'dataChannelName': 'server-events'
             }
         }
         
-        logger.info(f"Establishing DataChannel from session {control_session_id}")
+        logger.info(f"Establishing DataChannel transport...")
         
         async with aiohttp.ClientSession() as session:
-            async with session.post(establish_url, headers=headers, json=payload) as response:
+            async with session.post(establish_url, headers=headers, json=establish_payload) as response:
                 response_text = await response.text()
-                logger.info(f"Establish response: {response_text}")
+                logger.info(f"Establish transport response: {response_text}")
                 
                 if response.status in [200, 201]:
                     data = json.loads(response_text)
@@ -376,19 +375,45 @@ async def run_control_subscriber(car_controller, control_session_id):
                         async with aiohttp.ClientSession() as renegotiate_session:
                             async with renegotiate_session.put(renegotiate_url, headers=headers, json=renegotiate_payload) as renegotiate_response:
                                 if renegotiate_response.status in [200, 201]:
-                                    logger.info("Control DataChannel connection established")
+                                    logger.info("Transport renegotiation complete")
                                 else:
                                     logger.error(f"Failed to send answer: {await renegotiate_response.text()}")
                                     return None
-                    else:
+                    elif data.get('sessionDescription'):
                         # Got answer from Cloudflare directly
                         await pc_control.setRemoteDescription(RTCSessionDescription(
                             sdp=data['sessionDescription']['sdp'],
                             type=data['sessionDescription']['type']
                         ))
-                        logger.info("Control DataChannel connection established")
+                        logger.info("Transport established")
                 else:
-                    logger.error(f"Failed to establish DataChannel: {response_text}")
+                    logger.error(f"Failed to establish transport: {response_text}")
+                    return None
+        
+        # Step 2: Subscribe to remote 'control' DataChannel from browser session
+        dc_new_url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/{subscriber_session_id}/datachannels/new"
+        dc_new_payload = {
+            'dataChannels': [
+                {
+                    'location': 'remote',
+                    'sessionId': control_session_id,
+                    'dataChannelName': 'control'
+                }
+            ]
+        }
+        
+        logger.info(f"Subscribing to control DataChannel from session {control_session_id}")
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(dc_new_url, headers=headers, json=dc_new_payload) as response:
+                response_text = await response.text()
+                logger.info(f"DataChannel subscription response: {response_text}")
+                
+                if response.status in [200, 201]:
+                    data = json.loads(response_text)
+                    logger.info(f"Subscribed to DataChannel, waiting for ondatachannel event...")
+                else:
+                    logger.error(f"Failed to subscribe to DataChannel: {response_text}")
                     return None
         
         return pc_control
