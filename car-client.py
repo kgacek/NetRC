@@ -9,8 +9,6 @@ import aiohttp
 import json
 from fractions import Fraction
 import time
-import serial
-import serial.tools.list_ports
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -26,10 +24,6 @@ H=480
 
 # Signaling server configuration
 SIGNALING_SERVER = os.getenv('SIGNALING_SERVER', 'https://79-76-127-159.nip.io')
-
-# UART configuration for car control
-UART_DEV = os.getenv('UART_DEV', '/dev/ttyS0')
-UART_BAUD = int(os.getenv('UART_BAUD', '115200'))
 
 class PiCameraTrack(VideoStreamTrack):
     """
@@ -215,87 +209,11 @@ async def register_session(session_id):
     except Exception as e:
         logger.warning(f"Could not connect to signaling server: {e}")
 
-
-class CarController:
-    """
-    Controls the RC car via UART based on commands from DataChannel
-    """
-    def __init__(self, uart_dev=UART_DEV, uart_baud=UART_BAUD):
-        self.uart_dev = uart_dev
-        self.uart_baud = uart_baud
-        self.ser = None
-        self.seq = 0
-        self.throttle = 0
-        self.steer = 0
-        
-    def init_uart(self):
-        """Initialize UART connection"""
-        try:
-            self.ser = serial.Serial(self.uart_dev, self.uart_baud, timeout=0.1)
-            logger.info(f"UART initialized: {self.uart_dev} @ {self.uart_baud}")
-            time.sleep(0.2)
-            self.ser.reset_input_buffer()
-            self.ser.reset_output_buffer()
-            return True
-        except Exception as e:
-            logger.warning(f"UART not available: {e}. Running in video-only mode.")
-            return False
-    
-    def send_command(self, throttle, steer):
-        """Send command to ESP32 via UART"""
-        if not self.ser:
-            return
-        
-        self.seq = (self.seq + 1) & 0xFFFF
-        cmd = f"T,{int(throttle)},{int(steer)},0,{self.seq}\n"
-        
-        try:
-            self.ser.write(cmd.encode('ascii'))
-            self.ser.flush()
-        except Exception as e:
-            logger.error(f"UART send error: {e}")
-    
-    def process_control_message(self, message):
-        """Process control message from DataChannel"""
-        try:
-            data = json.loads(message)
-            throttle = int(data.get('throttle', 0))
-            steer = int(data.get('steer', 0))
-            
-            # Clamp values to safe ranges
-            throttle = max(-300, min(300, throttle))
-            steer = max(-1000, min(1000, steer))
-            
-            self.throttle = throttle
-            self.steer = steer
-            
-            self.send_command(throttle, steer)
-            logger.debug(f"Control: throttle={throttle}, steer={steer}")
-            
-        except json.JSONDecodeError:
-            logger.warning(f"Invalid JSON in control message: {message}")
-        except Exception as e:
-            logger.error(f"Error processing control message: {e}")
-    
-    def stop(self):
-        """Stop the car and close UART"""
-        if self.ser:
-            self.send_command(0, 0)
-            time.sleep(0.1)
-            self.ser.close()
-            logger.info("UART closed")
-
 async def run_stream():
     """
     Main function to stream video from Pi Camera
     """
-    car_controller = None
-    
     try:
-        # Initialize car controller
-        car_controller = CarController()
-        car_controller.init_uart()
-        
         # Create session
         logger.info("Creating Cloudflare session...")
         session_id = await create_session()
@@ -322,26 +240,6 @@ async def run_stream():
         logger.info("Initializing camera...")
         camera_track = PiCameraTrack()
         pc.addTrack(camera_track)
-        
-        # Create DataChannel for receiving control commands from browser
-        control_channel = pc.createDataChannel('control', ordered=False)
-        logger.info("DataChannel 'control' created")
-        
-        # Setup DataChannel handlers
-        @control_channel.on('open')
-        def on_open():
-            logger.info("Control DataChannel opened - ready to receive commands")
-        
-        @control_channel.on('message')
-        def on_message(message):
-            if car_controller:
-                car_controller.process_control_message(message)
-        
-        @control_channel.on('close')
-        def on_close():
-            logger.info("Control DataChannel closed")
-            if car_controller:
-                car_controller.send_command(0, 0)  # Stop car on disconnect
         
         # Create offer
         logger.info("Creating WebRTC offer...")
@@ -384,16 +282,10 @@ async def run_stream():
         # Cleanup
         camera_track.stop()
         await pc.close()
-        
-        if car_controller:
-            car_controller.stop()
-        
         logger.info("Stream stopped")
         
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
-        if car_controller:
-            car_controller.stop()
         sys.exit(1)
 
 
