@@ -549,6 +549,24 @@
                 console.log('Control session ready:', myControlSessionId);
                 console.log('RPi should now pull from this session');
                 
+                // Register control session with signaling server
+                const signalingServer = document.getElementById('signalingServer').value;
+                if (signalingServer) {
+                    try {
+                        await fetch(`${signalingServer}/api/control`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                videoSessionId: selectedSessionId,
+                                controlSessionId: myControlSessionId
+                            })
+                        });
+                        console.log('Control session registered with signaling server');
+                    } catch (e) {
+                        console.warn('Could not register control session:', e);
+                    }
+                }
+                
             } catch (error) {
                 console.error('Control setup error:', error);
                 updateStatus(`Control setup failed: ${error.message}`, 'error');

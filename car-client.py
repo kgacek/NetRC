@@ -429,8 +429,31 @@ async def run_stream():
         logger.info("Streaming started! Press Ctrl+C to stop.")
         logger.info(f"Track published with name: camera")
         
-        logger.info("Waiting for browser to provide control session ID...")
-        logger.info("Browser should create a control session and send it to signaling server")
+        logger.info("Waiting for browser control connection...")
+        
+        # Poll signaling server for control session
+        control_session_id = None
+        for attempt in range(60):  # Wait up to 60 seconds
+            try:
+                url = f"{SIGNALING_SERVER}/api/control-session?id={session_id}"
+                async with aiohttp.ClientSession() as http_session:
+                    async with http_session.get(url, timeout=aiohttp.ClientTimeout(total=2)) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            control_session_id = data.get('controlSessionId')
+                            if control_session_id:
+                                logger.info(f"Got control session ID: {control_session_id}")
+                                break
+            except Exception as e:
+                pass
+            
+            await asyncio.sleep(1)
+        
+        if control_session_id and car_controller:
+            logger.info("Setting up control subscriber...")
+            pc_control = await run_control_subscriber(car_controller, control_session_id)
+        else:
+            logger.warning("No control session found - running video-only")
         
         # Keep running
         try:
