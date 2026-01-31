@@ -413,26 +413,25 @@
                     }
                 };
                 
-                // Create DataChannel for sending control commands
-                // DataChannel is included automatically in SDP when created
-                controlChannel = peerConnection.createDataChannel('control', {
-                    ordered: false,
-                    maxRetransmits: 0
-                });
-                
-                controlChannel.onopen = () => {
-                    console.log('Control DataChannel opened');
-                    updateStatus('Control channel ready! Use WASD to control car.', 'success');
-                    startControlLoop();
-                };
-                
-                controlChannel.onclose = () => {
-                    console.log('Control DataChannel closed');
-                    stopControlLoop();
-                };
-                
-                controlChannel.onerror = (error) => {
-                    console.error('DataChannel error:', error);
+                // Receive DataChannel from RPi (RPi creates it, we receive it)
+                peerConnection.ondatachannel = (event) => {
+                    console.log('DataChannel received from RPi:', event.channel.label);
+                    controlChannel = event.channel;
+                    
+                    controlChannel.onopen = () => {
+                        console.log('Control DataChannel opened');
+                        updateStatus('Control channel ready! Use WASD to control car.', 'success');
+                        startControlLoop();
+                    };
+                    
+                    controlChannel.onclose = () => {
+                        console.log('Control DataChannel closed');
+                        stopControlLoop();
+                    };
+                    
+                    controlChannel.onerror = (error) => {
+                        console.error('DataChannel error:', error);
+                    };
                 };
 
                 // Add transceiver to receive video
@@ -502,57 +501,6 @@
                         type: pullData.sessionDescription.type,
                         sdp: pullData.sessionDescription.sdp
                     });
-                    
-                    // Now renegotiate to push DataChannel to RPi
-                    // Create a new offer that includes our DataChannel
-                    console.log('Renegotiating to add DataChannel...');
-                    const newOffer = await peerConnection.createOffer();
-                    await peerConnection.setLocalDescription(newOffer);
-                    
-                    // Wait for ICE gathering again
-                    await new Promise((resolve) => {
-                        if (peerConnection.iceGatheringState === 'complete') {
-                            resolve();
-                        } else {
-                            const checkState = () => {
-                                if (peerConnection.iceGatheringState === 'complete') {
-                                    peerConnection.removeEventListener('icegatheringstatechange', checkState);
-                                    resolve();
-                                }
-                            };
-                            peerConnection.addEventListener('icegatheringstatechange', checkState);
-                        }
-                    });
-                    
-                    // Push the updated SDP with DataChannel to RPi session
-                    const renegotiateResponse = await fetch(`https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${rpiSessionId}/renegotiate`, {
-                        method: 'PUT',
-                        headers: {
-                            'Authorization': `Bearer ${appSecret}`,
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify({
-                            sessionDescription: {
-                                type: 'answer',
-                                sdp: peerConnection.localDescription.sdp
-                            }
-                        })
-                    });
-                    
-                    if (renegotiateResponse.ok) {
-                        const renegotiateData = await renegotiateResponse.json();
-                        console.log('Renegotiation response:', renegotiateData);
-                        
-                        if (renegotiateData.sessionDescription) {
-                            await peerConnection.setRemoteDescription({
-                                type: renegotiateData.sessionDescription.type,
-                                sdp: renegotiateData.sessionDescription.sdp
-                            });
-                        }
-                    } else {
-                        console.warn('Renegotiation failed:', await renegotiateResponse.text());
-                    }
-                    
                     updateStatus('Waiting for video stream...', 'success');
                 } else {
                     throw new Error('No session description in response');

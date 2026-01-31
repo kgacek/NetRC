@@ -323,21 +323,25 @@ async def run_stream():
         camera_track = PiCameraTrack()
         pc.addTrack(camera_track)
         
-        # Create DataChannel for receiving control commands
-        @pc.on('datachannel')
-        def on_datachannel(channel):
-            logger.info(f"DataChannel opened: {channel.label}")
-            
-            @channel.on('message')
-            def on_message(message):
-                if car_controller:
-                    car_controller.process_control_message(message)
-            
-            @channel.on('close')
-            def on_close():
-                logger.info("DataChannel closed")
-                if car_controller:
-                    car_controller.send_command(0, 0)  # Stop car on disconnect
+        # Create DataChannel for receiving control commands from browser
+        control_channel = pc.createDataChannel('control', ordered=False)
+        logger.info("DataChannel 'control' created")
+        
+        # Setup DataChannel handlers
+        @control_channel.on('open')
+        def on_open():
+            logger.info("Control DataChannel opened - ready to receive commands")
+        
+        @control_channel.on('message')
+        def on_message(message):
+            if car_controller:
+                car_controller.process_control_message(message)
+        
+        @control_channel.on('close')
+        def on_close():
+            logger.info("Control DataChannel closed")
+            if car_controller:
+                car_controller.send_command(0, 0)  # Stop car on disconnect
         
         # Create offer
         logger.info("Creating WebRTC offer...")
