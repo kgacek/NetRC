@@ -345,7 +345,19 @@ async def run_control_subscriber(car_controller, control_session_id):
         async with aiohttp.ClientSession() as session:
             async with session.post(url, headers=headers, json=payload) as response:
                 response_text = await response.text()
-                logger.info(f"DataChannel pull response: {response_text}")
+                logger.info(f"DataChannel registration response: {response_text}")
+                
+                if response.status not in [200, 201]:
+                    logger.error(f"Failed to register DataChannel: {response_text}")
+                    return None
+        
+        # Now call renegotiate to get the offer with DataChannel
+        renegotiate_url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/{subscriber_session_id}/renegotiate"
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.put(renegotiate_url, headers=headers, json={}) as response:
+                response_text = await response.text()
+                logger.info(f"Renegotiate response: {response_text}")
                 
                 if response.status in [200, 201]:
                     data = json.loads(response_text)
@@ -366,7 +378,6 @@ async def run_control_subscriber(car_controller, control_session_id):
                             await asyncio.sleep(0.1)
                         
                         # Send answer back to Cloudflare
-                        answer_url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/{subscriber_session_id}/renegotiate"
                         answer_payload = {
                             'sessionDescription': {
                                 'type': 'answer',
@@ -375,17 +386,17 @@ async def run_control_subscriber(car_controller, control_session_id):
                         }
                         
                         async with aiohttp.ClientSession() as answer_session:
-                            async with answer_session.put(answer_url, headers=headers, json=answer_payload) as answer_response:
+                            async with answer_session.put(renegotiate_url, headers=headers, json=answer_payload) as answer_response:
                                 if answer_response.status in [200, 201]:
                                     logger.info("Control DataChannel connection established")
                                 else:
                                     logger.error(f"Failed to send answer: {await answer_response.text()}")
                                     return None
                     else:
-                        logger.error("No sessionDescription in response")
+                        logger.error("No sessionDescription in renegotiate response")
                         return None
                 else:
-                    logger.error(f"Failed to pull DataChannel: {response_text}")
+                    logger.error(f"Failed to renegotiate: {response_text}")
                     return None
         
         return pc_control
