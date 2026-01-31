@@ -478,11 +478,11 @@
                 );
                 
                 const establishData = await establishResponse.json();
-                console.log('Establish transport response:', establishData);
                 
                 if (!establishResponse.ok) {
                     throw new Error(`Failed to establish transport: ${JSON.stringify(establishData)}`);
                 }
+                console.log('Transport established');
                 
                 if (establishData.requiresImmediateRenegotiation) {
                     await controlConnection.setRemoteDescription(establishData.sessionDescription);
@@ -509,8 +509,6 @@
                     await controlConnection.setRemoteDescription(establishData.sessionDescription);
                 }
                 
-                // Now create the actual control DataChannel using /datachannels/new
-                console.log('Creating control DataChannel...');
                 const dcNewResponse = await fetch(
                     `https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${myControlSessionId}/datachannels/new`,
                     {
@@ -529,14 +527,12 @@
                 );
                 
                 const dcNewData = await dcNewResponse.json();
-                console.log('DataChannel new response:', dcNewData);
                 
                 if (!dcNewResponse.ok) {
                     throw new Error(`Failed to create DataChannel: ${JSON.stringify(dcNewData)}`);
                 }
                 
                 const controlChannelId = dcNewData.dataChannels[0].id;
-                console.log('Browser DataChannel ID:', controlChannelId);
                 
                 // Register control session with signaling server BEFORE creating negotiated DataChannel
                 // This allows RPi to start subscribing
@@ -551,11 +547,7 @@
                                 controlSessionId: myControlSessionId
                             })
                         });
-                        console.log('Control session registered with signaling server');
-                        
-                        // Wait for RPi to complete its subscription
-                        // Zwiększone do 3s dla pewności, szczególnie przy słabszym Wi-Fi
-                        console.log('Waiting 3s for RPi to subscribe...');
+                        console.log('Control session registered, waiting for RPi...');
                         await new Promise(resolve => setTimeout(resolve, 3000));
                         
                     } catch (e) {
@@ -563,16 +555,13 @@
                     }
                 }
                 
-                // NOW create negotiated DataChannel after RPi had time to subscribe
                 controlChannel = controlConnection.createDataChannel('control', {
                     negotiated: true,
                     id: controlChannelId
                 });
                 
-                console.log(`Created negotiated DataChannel with ID: ${controlChannelId}`);
-                
                 controlChannel.onopen = () => {
-                    console.log('Control DataChannel opened');
+                    console.log('Control ready');
                     updateStatus('Control ready! Use WASD to drive.', 'success');
                     startControlLoop();
                 };
@@ -585,8 +574,6 @@
                 controlChannel.onerror = (error) => {
                     console.error('DataChannel error:', error);
                 };
-                
-                console.log('Control setup complete!');
                 
             } catch (error) {
                 console.error('Control setup error:', error);
@@ -621,28 +608,12 @@
                 }
             }
             
-            // Send control command via DataChannel
-            if (controlChannel) {
-                if (controlChannel.readyState === 'open') {
-                    const command = JSON.stringify({
-                        throttle: Math.round(throttle),
-                        steer: Math.round(steer)
-                    });
-                    controlChannel.send(command);
-                    
-                    // Debug: log every 20 sends (about 1 per second)
-                    if (Math.random() < 0.05) {
-                        console.log('Sent control:', command);
-                    }
-                } else {
-                    if (Math.random() < 0.05) {
-                        console.log('Control channel not open:', controlChannel.readyState);
-                    }
-                }
-            } else {
-                if (Math.random() < 0.05) {
-                    console.log('No control channel');
-                }
+            if (controlChannel && controlChannel.readyState === 'open') {
+                const command = JSON.stringify({
+                    throttle: Math.round(throttle),
+                    steer: Math.round(steer)
+                });
+                controlChannel.send(command);
             }
         }
         

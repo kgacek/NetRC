@@ -315,7 +315,6 @@ async def run_control_subscriber(car_controller, control_session_id):
                 subscriber_session_id = data['sessionId']
                 logger.info(f"Created subscriber session: {subscriber_session_id}")
         
-        # Step 1: Establish DataChannel transport (like Cloudflare example)
         establish_url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/{subscriber_session_id}/datachannels/establish"
         establish_payload = {
             'dataChannel': {
@@ -324,23 +323,18 @@ async def run_control_subscriber(car_controller, control_session_id):
             }
         }
         
-        logger.info(f"Establishing DataChannel transport...")
-        
         async with aiohttp.ClientSession() as session:
             async with session.post(establish_url, headers=headers, json=establish_payload) as response:
                 response_text = await response.text()
-                logger.info(f"Establish transport response: {response_text}")
                 
                 if response.status in [200, 201]:
                     data = json.loads(response_text)
                     
                     if data.get('requiresImmediateRenegotiation'):
-                        # We got an offer from Cloudflare, need to answer
                         await pc_control.setRemoteDescription(RTCSessionDescription(
                             sdp=data['sessionDescription']['sdp'],
                             type=data['sessionDescription']['type']
                         ))
-                        logger.info("Received offer from Cloudflare, creating answer")
                         
                         # Create answer
                         answer = await pc_control.createAnswer()
@@ -361,18 +355,14 @@ async def run_control_subscriber(car_controller, control_session_id):
                         
                         async with aiohttp.ClientSession() as renegotiate_session:
                             async with renegotiate_session.put(renegotiate_url, headers=headers, json=renegotiate_payload) as renegotiate_response:
-                                if renegotiate_response.status in [200, 201]:
-                                    logger.info("Transport renegotiation complete")
-                                else:
+                                if renegotiate_response.status not in [200, 201]:
                                     logger.error(f"Failed to send answer: {await renegotiate_response.text()}")
                                     return None
                     elif data.get('sessionDescription'):
-                        # Got answer from Cloudflare directly
                         await pc_control.setRemoteDescription(RTCSessionDescription(
                             sdp=data['sessionDescription']['sdp'],
                             type=data['sessionDescription']['type']
                         ))
-                        logger.info("Transport established")
                 else:
                     logger.error(f"Failed to establish transport: {response_text}")
                     return None
@@ -394,7 +384,6 @@ async def run_control_subscriber(car_controller, control_session_id):
         async with aiohttp.ClientSession() as session:
             async with session.post(dc_new_url, headers=headers, json=dc_new_payload) as response:
                 response_text = await response.text()
-                logger.info(f"DataChannel subscription response: {response_text}")
                 
                 if response.status in [200, 201]:
                     data = json.loads(response_text)
@@ -425,8 +414,6 @@ async def run_control_subscriber(car_controller, control_session_id):
                     @control_dc.on('error')
                     def on_error(error):
                         logger.error(f"Control DataChannel error: {error}")
-                    
-                    logger.info(f"Control DataChannel subscribed successfully")
                 else:
                     logger.error(f"Failed to subscribe to DataChannel: {response_text}")
                     return None

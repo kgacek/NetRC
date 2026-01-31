@@ -42,7 +42,6 @@ class SignalingHandler(BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps({'success': True}).encode())
-            print(f"Publisher registered: {session_id}")
         
         elif self.path == '/api/control':
             content_length = int(self.headers['Content-Length'])
@@ -54,7 +53,6 @@ class SignalingHandler(BaseHTTPRequestHandler):
             
             if video_session_id and video_session_id in sessions:
                 sessions[video_session_id]['controlSessionId'] = control_session_id
-                print(f"Control session linked: {video_session_id} -> {control_session_id}")
                 
                 self.send_response(200)
                 self._send_cors_headers()
@@ -133,7 +131,5 @@ class SignalingHandler(BaseHTTPRequestHandler):
 if __name__ == '__main__':
     PORT = 8080
     server = HTTPServer(('0.0.0.0', PORT), SignalingHandler)
-    print(f"Signaling server running on port {PORT}")
-    print(f"Publisher endpoint: http://localhost:{PORT}/api/publish")
-    print(f"Sessions list: http://localhost:{PORT}/api/sessions")
+    print(f"Signaling server running on http://0.0.0.0:{PORT}")
     server.serve_forever()
