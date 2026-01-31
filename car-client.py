@@ -297,22 +297,6 @@ async def run_control_subscriber(car_controller, control_session_id):
             )
         )
         
-        # Handle incoming DataChannel from browser
-        @pc_control.on('datachannel')
-        def on_datachannel(channel):
-            logger.info(f"Control DataChannel received: {channel.label}")
-            
-            @channel.on('message')
-            def on_message(message):
-                if car_controller:
-                    car_controller.process_control_message(message)
-            
-            @channel.on('close')
-            def on_close():
-                logger.info("Control DataChannel closed")
-                if car_controller:
-                    car_controller.send_command(0, 0)
-        
         # Use Cloudflare /datachannels/establish API
         url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/new"
         headers = {
