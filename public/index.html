@@ -437,7 +437,7 @@
                     bundlePolicy: 'max-bundle'
                 });
                 
-                // Create DataChannel for sending control commands
+                // Create DataChannel FIRST before creating offer
                 controlChannel = controlConnection.createDataChannel('control', {
                     ordered: false,
                     maxRetransmits: 0
@@ -458,9 +458,11 @@
                     console.error('DataChannel error:', error);
                 };
                 
-                // Create offer
+                // Create offer - this will include the DataChannel in SDP
                 const offer = await controlConnection.createOffer();
                 await controlConnection.setLocalDescription(offer);
+                
+                console.log('Control offer SDP:', offer.sdp);
                 
                 // Wait for ICE gathering
                 await new Promise((resolve) => {
@@ -477,49 +479,65 @@
                     }
                 });
                 
-                // Find DataChannel mid in SDP
-                const sdpLines = controlConnection.localDescription.sdp.split('\n');
+                // Find DataChannel mid in SDP - it's in m=application line
+                const sdpLines = controlConnection.localDescription.sdp.split('\r\n');
                 let dcMid = null;
-                let currentMid = null;
-                for (const line of sdpLines) {
-                    if (line.startsWith('a=mid:')) {
-                        currentMid = line.split(':')[1].trim();
-                    } else if (line.startsWith('m=application') && currentMid) {
-                        dcMid = currentMid;
+                
+                for (let i = 0; i < sdpLines.length; i++) {
+                    const line = sdpLines[i];
+                    if (line.startsWith('m=application')) {
+                        // Look for a=mid: in the next lines
+                        for (let j = i + 1; j < sdpLines.length && !sdpLines[j].startsWith('m='); j++) {
+                            if (sdpLines[j].startsWith('a=mid:')) {
+                                dcMid = sdpLines[j].substring(6).trim();
+                                break;
+                            }
+                        }
                         break;
                     }
                 }
                 
                 console.log('DataChannel mid:', dcMid);
                 
+                if (!dcMid) {
+                    throw new Error('Could not find DataChannel mid in SDP');
+                }
+                
                 // Push DataChannel track to OUR session
+                const pushPayload = {
+                    sessionDescription: {
+                        type: 'offer',
+                        sdp: controlConnection.localDescription.sdp
+                    },
+                    tracks: [
+                        {
+                            location: 'local',
+                            trackName: 'control',
+                            mid: dcMid
+                        }
+                    ]
+                };
+                
+                console.log('Pushing control track with payload:', JSON.stringify(pushPayload, null, 2));
+                
                 const pushResponse = await fetch(`https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${myControlSessionId}/tracks/new`, {
                     method: 'POST',
                     headers: {
                         'Authorization': `Bearer ${appSecret}`,
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify({
-                        sessionDescription: {
-                            type: 'offer',
-                            sdp: controlConnection.localDescription.sdp
-                        },
-                        tracks: [
-                            {
-                                location: 'local',
-                                trackName: 'control',
-                                mid: dcMid
-                            }
-                        ]
-                    })
+                    body: JSON.stringify(pushPayload)
                 });
                 
+                const pushText = await pushResponse.text();
+                console.log('Control push response status:', pushResponse.status);
+                console.log('Control push response:', pushText);
+                
                 if (!pushResponse.ok) {
-                    throw new Error(`Failed to push control track: ${await pushResponse.text()}`);
+                    throw new Error(`Failed to push control track: ${pushText}`);
                 }
                 
-                const pushData = await pushResponse.json();
-                console.log('Control push response:', pushData);
+                const pushData = JSON.parse(pushText);
                 
                 if (pushData.sessionDescription) {
                     await controlConnection.setRemoteDescription({
@@ -529,6 +547,7 @@
                 }
                 
                 console.log('Control session ready:', myControlSessionId);
+                console.log('RPi should now pull from this session');
                 
             } catch (error) {
                 console.error('Control setup error:', error);
