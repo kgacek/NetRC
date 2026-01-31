@@ -162,7 +162,7 @@
         const THROTTLE_DECEL = 20;
         const STEER_SPEED = 70;
         const STEER_RETURN_SPEED = 80;
-        const MAX_THROTTLE = 300;
+        const MAX_THROTTLE = 125;
         const MAX_STEER = 1000;
 
         function updateStatus(message, type = 'info') {
@@ -530,14 +530,13 @@
                 
                 const dcNewData = await dcNewResponse.json();
                 console.log('DataChannel new response:', dcNewData);
-                console.log('Browser DataChannel ID from API:', dcNewData.dataChannels[0].id);
                 
                 if (!dcNewResponse.ok) {
                     throw new Error(`Failed to create DataChannel: ${JSON.stringify(dcNewData)}`);
                 }
                 
                 const controlChannelId = dcNewData.dataChannels[0].id;
-                console.log('Browser DataChannel ID from API:', controlChannelId);
+                console.log('Browser DataChannel ID:', controlChannelId);
                 
                 // Register control session with signaling server BEFORE creating negotiated DataChannel
                 // This allows RPi to start subscribing
@@ -597,9 +596,9 @@
         function updateCarControl() {
             // === THROTTLE ===
             if (keys['w'] && !keys['s']) {
-                throttle = Math.max(throttle - THROTTLE_ACCEL - 40, -MAX_THROTTLE);
+                throttle = Math.max(throttle - THROTTLE_ACCEL - 100, -MAX_THROTTLE);
             } else if (keys['s'] && !keys['w']) {
-                throttle = Math.min(40 + throttle + THROTTLE_ACCEL, MAX_THROTTLE);
+                throttle = Math.min(100 + throttle + THROTTLE_ACCEL, MAX_THROTTLE);
             } else {
                 if (throttle > 0) {
                     throttle = Math.max(0, throttle - THROTTLE_DECEL);
@@ -623,8 +622,6 @@
             
             // Send control command via DataChannel
             if (controlChannel) {
-                console.log('Channel state:', controlChannel.readyState, 'ID:', controlChannel.id);
-                
                 if (controlChannel.readyState === 'open') {
                     const command = JSON.stringify({
                         throttle: Math.round(throttle),

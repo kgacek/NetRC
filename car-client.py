@@ -406,11 +406,9 @@ async def run_control_subscriber(car_controller, control_session_id):
                     # Create negotiated DataChannel - this will trigger ondatachannel when connected
                     control_dc = pc_control.createDataChannel('control-subscribed', negotiated=True, id=dc_id)
                     
-                    logger.info(f"DataChannel created, label={control_dc.label}, id={control_dc.id}, readyState={control_dc.readyState}")
-                    
                     @control_dc.on('open')
                     def on_open():
-                        logger.info(f"Control DataChannel opened! readyState={control_dc.readyState}")
+                        logger.info(f"Control DataChannel opened!")
                     
                     @control_dc.on('message')
                     def on_message(message):
@@ -428,7 +426,7 @@ async def run_control_subscriber(car_controller, control_session_id):
                     def on_error(error):
                         logger.error(f"Control DataChannel error: {error}")
                     
-                    logger.info(f"Subscribed to DataChannel successfully, waiting for messages...")
+                    logger.info(f"Control DataChannel subscribed successfully")
                 else:
                     logger.error(f"Failed to subscribe to DataChannel: {response_text}")
                     return None
