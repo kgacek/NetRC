@@ -607,19 +607,29 @@
             }
             
             // Send control command via DataChannel
-            if (controlChannel && controlChannel.readyState === 'open') {
-                const command = JSON.stringify({
-                    throttle: Math.round(throttle),
-                    steer: Math.round(steer)
-                });
-                controlChannel.send(command);
+            if (controlChannel) {
+                console.log('Channel state:', controlChannel.readyState, 'ID:', controlChannel.id);
                 
-                // Debug: log every 20 sends (about 1 per second)
-                if (Math.random() < 0.05) {
-                    console.log('Sent control:', command);
+                if (controlChannel.readyState === 'open') {
+                    const command = JSON.stringify({
+                        throttle: Math.round(throttle),
+                        steer: Math.round(steer)
+                    });
+                    controlChannel.send(command);
+                    
+                    // Debug: log every 20 sends (about 1 per second)
+                    if (Math.random() < 0.05) {
+                        console.log('Sent control:', command);
+                    }
+                } else {
+                    if (Math.random() < 0.05) {
+                        console.log('Control channel not open:', controlChannel.readyState);
+                    }
                 }
-            } else if (controlChannel) {
-                console.log('Control channel state:', controlChannel.readyState);
+            } else {
+                if (Math.random() < 0.05) {
+                    console.log('No control channel');
+                }
             }
         }
         
