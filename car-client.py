@@ -284,6 +284,7 @@ class CarController:
 async def run_control_subscriber(car_controller, control_session_id):
     """
     Separate PeerConnection to receive control DataChannel from browser
+    Uses Cloudflare /datachannels/establish endpoint pattern
     """
     try:
         logger.info(f"Setting up control subscriber for session: {control_session_id}")
@@ -294,22 +295,6 @@ async def run_control_subscriber(car_controller, control_session_id):
                 iceServers=[RTCIceServer(urls=['stun:stun.cloudflare.com:3478'])]
             )
         )
-        
-        # Handle incoming DataChannel from browser
-        @pc_control.on('datachannel')
-        def on_datachannel(channel):
-            logger.info(f"Control DataChannel received: {channel.label}")
-            
-            @channel.on('message')
-            def on_message(message):
-                if car_controller:
-                    car_controller.process_control_message(message)
-            
-            @channel.on('close')
-            def on_close():
-                logger.info("Control DataChannel closed")
-                if car_controller:
-                    car_controller.send_command(0, 0)
         
         # Use Cloudflare Realtime API to pull DataChannel
         url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/new"
@@ -328,56 +313,102 @@ async def run_control_subscriber(car_controller, control_session_id):
                 subscriber_session_id = data['sessionId']
                 logger.info(f"Created subscriber session: {subscriber_session_id}")
         
-        # Create a local DataChannel to be able to create an offer
-        data_channel = pc_control.createDataChannel('control')
-        logger.info("Created local DataChannel placeholder")
-        
-        # Create initial offer
-        offer = await pc_control.createOffer()
-        await pc_control.setLocalDescription(offer)
-        
-        # Wait for ICE gathering
-        while pc_control.iceGatheringState != 'complete':
-            await asyncio.sleep(0.1)
-        
-        # Pull control DataChannel from browser session
-        dc_url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/{subscriber_session_id}/datachannels/new"
+        # Call /datachannels/establish to get remote DataChannel
+        # This follows the Cloudflare example pattern
+        dc_url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/{subscriber_session_id}/datachannels/establish"
         payload = {
-            'sessionDescription': {
-                'type': 'offer',
-                'sdp': pc_control.localDescription.sdp
-            },
-            'dataChannels': [
-                {
-                    'location': 'remote',
-                    'sessionId': control_session_id,
-                    'dataChannelName': 'control'
-                }
-            ]
+            'dataChannel': {
+                'location': 'remote',
+                'sessionId': control_session_id,
+                'dataChannelName': 'control'
+            }
         }
         
-        logger.info(f"Pulling DataChannel from session {control_session_id}")
+        logger.info(f"Establishing DataChannel from session {control_session_id}")
         
         async with aiohttp.ClientSession() as session:
             async with session.post(dc_url, headers=headers, json=payload) as response:
                 response_text = await response.text()
-                logger.info(f"DataChannel response: {response_text}")
+                logger.info(f"DataChannel establish response: {response_text}")
                 
-                if response.status in [200, 201]:
-                    data = json.loads(response_text)
-                    if 'sessionDescription' in data:
-                        # Got answer from Cloudflare
-                        await pc_control.setRemoteDescription(RTCSessionDescription(
-                            sdp=data['sessionDescription']['sdp'],
-                            type=data['sessionDescription']['type']
-                        ))
-                        logger.info("Control DataChannel connection established")
-                    else:
-                        logger.error("No sessionDescription in response")
-                        return None
-                else:
-                    logger.error(f"Failed to pull DataChannel: {response_text}")
+                if response.status not in [200, 201]:
+                    logger.error(f"Failed to establish DataChannel: {response_text}")
                     return None
+                
+                data = json.loads(response_text)
+                
+                # Check if we need immediate renegotiation (we got offer from server)
+                if data.get('requiresImmediateRenegotiation'):
+                    # Set remote description from Cloudflare
+                    await pc_control.setRemoteDescription(RTCSessionDescription(
+                        sdp=data['sessionDescription']['sdp'],
+                        type=data['sessionDescription']['type']
+                    ))
+                    logger.info("Received offer from Cloudflare, creating answer")
+                    
+                    # Create answer
+                    answer = await pc_control.createAnswer()
+                    await pc_control.setLocalDescription(answer)
+                    
+                    # Send answer back to Cloudflare
+                    renegotiate_url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/{subscriber_session_id}/renegotiate"
+                    answer_payload = {
+                        'sessionDescription': {
+                            'type': 'answer',
+                            'sdp': answer.sdp
+                        }
+                    }
+                    
+                    async with aiohttp.ClientSession() as answer_session:
+                        async with answer_session.put(renegotiate_url, headers=headers, json=answer_payload) as answer_response:
+                            if answer_response.status not in [200, 201]:
+                                logger.error(f"Failed to send answer: {await answer_response.text()}")
+                                return None
+                            logger.info("Sent answer to Cloudflare")
+                else:
+                    # Normal flow - set remote description
+                    await pc_control.setRemoteDescription(RTCSessionDescription(
+                        sdp=data['sessionDescription']['sdp'],
+                        type=data['sessionDescription']['type']
+                    ))
+                    logger.info("Set remote description from Cloudflare")
+        
+        # Now create negotiated DataChannel with ID from response
+        # This will receive the actual DataChannel from browser
+        if 'dataChannel' in data and 'id' in data['dataChannel']:
+            dc_id = data['dataChannel']['id']
+            logger.info(f"Creating negotiated DataChannel with ID: {dc_id}")
+            
+            control_channel = pc_control.createDataChannel(
+                'control-subscribed',
+                RTCDataChannelParameters(
+                    negotiated=True,
+                    id=dc_id
+                )
+            )
+            
+            # Set up message handler
+            @control_channel.on('message')
+            def on_message(message):
+                if car_controller:
+                    car_controller.process_control_message(message)
+            
+            @control_channel.on('open')
+            def on_open():
+                logger.info("Control DataChannel opened")
+            
+            @control_channel.on('close')
+            def on_close():
+                logger.info("Control DataChannel closed")
+                if car_controller:
+                    car_controller.send_command(0, 0)
+        
+        logger.info("Control DataChannel connection established")
+        return pc_control
+        
+    except Exception as e:
+        logger.error(f"Error in control subscriber: {e}", exc_info=True)
+        return None
         
         return pc_control
         
