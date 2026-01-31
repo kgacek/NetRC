@@ -437,28 +437,7 @@
                     bundlePolicy: 'max-bundle'
                 });
                 
-                // Create DataChannel FIRST before creating offer
-                controlChannel = controlConnection.createDataChannel('control', {
-                    ordered: false,
-                    maxRetransmits: 0
-                });
-                
-                controlChannel.onopen = () => {
-                    console.log('Control DataChannel opened');
-                    updateStatus('Control ready! Use WASD to drive.', 'success');
-                    startControlLoop();
-                };
-                
-                controlChannel.onclose = () => {
-                    console.log('Control DataChannel closed');
-                    stopControlLoop();
-                };
-                
-                controlChannel.onerror = (error) => {
-                    console.error('DataChannel error:', error);
-                };
-                
-                // Create offer - this will include the DataChannel in SDP
+                // Create offer for transport
                 const offer = await controlConnection.createOffer();
                 await controlConnection.setLocalDescription(offer);
                 
@@ -540,6 +519,34 @@
                 
                 const dcNewData = await dcNewResponse.json();
                 console.log('DataChannel new response:', dcNewData);
+                
+                if (!dcNewResponse.ok) {
+                    throw new Error(`Failed to create DataChannel: ${JSON.stringify(dcNewData)}`);
+                }
+                
+                // Create negotiated DataChannel with ID from API
+                const controlChannelId = dcNewData.dataChannels[0].id;
+                controlChannel = controlConnection.createDataChannel('control', {
+                    negotiated: true,
+                    id: controlChannelId
+                });
+                
+                console.log(`Created negotiated DataChannel with ID: ${controlChannelId}`);
+                
+                controlChannel.onopen = () => {
+                    console.log('Control DataChannel opened');
+                    updateStatus('Control ready! Use WASD to drive.', 'success');
+                    startControlLoop();
+                };
+                
+                controlChannel.onclose = () => {
+                    console.log('Control DataChannel closed');
+                    stopControlLoop();
+                };
+                
+                controlChannel.onerror = (error) => {
+                    console.error('DataChannel error:', error);
+                };
                 
                 console.log('Control session ready:', myControlSessionId);
                 console.log('RPi should now pull from this session');

@@ -411,7 +411,30 @@ async def run_control_subscriber(car_controller, control_session_id):
                 
                 if response.status in [200, 201]:
                     data = json.loads(response_text)
-                    logger.info(f"Subscribed to DataChannel, waiting for ondatachannel event...")
+                    
+                    # Create negotiated DataChannel with ID from API
+                    dc_id = data['dataChannels'][0]['id']
+                    logger.info(f"Creating negotiated DataChannel with ID: {dc_id}")
+                    
+                    # Create negotiated DataChannel - this will trigger ondatachannel when connected
+                    control_dc = pc_control.createDataChannel('control-subscribed', negotiated=True, id=dc_id)
+                    
+                    @control_dc.on('open')
+                    def on_open():
+                        logger.info("Control DataChannel opened!")
+                    
+                    @control_dc.on('message')
+                    def on_message(message):
+                        if car_controller:
+                            car_controller.process_control_message(message)
+                    
+                    @control_dc.on('close')
+                    def on_close():
+                        logger.info("Control DataChannel closed")
+                        if car_controller:
+                            car_controller.send_command(0, 0)
+                    
+                    logger.info(f"Subscribed to DataChannel successfully")
                 else:
                     logger.error(f"Failed to subscribe to DataChannel: {response_text}")
                     return None
