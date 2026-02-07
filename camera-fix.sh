@@ -3,34 +3,35 @@
 
 echo "=== Naprawianie ustawień kamery IMX219 ==="
 
-# WAŻNE: IMX219 ma kontrolki w /dev/v4l-subdev3, nie w /dev/video0!
-SENSOR_DEV="/dev/v4l-subdev3"
+# Używamy /dev/video0 (działa równie dobrze jak subdev3)
+CAMERA_DEV="/dev/video0"
 
-# Wyłącz auto-exposure i ustaw ręcznie
-echo "1. Ustawianie exposure na sensorze..."
-# Dla IMX219: exposure range to zazwyczaj 1-3448 (linie)
-v4l2-ctl -d $SENSOR_DEV --set-ctrl=exposure=1000
+echo "Obecne wartości (przed zmianą):"
+v4l2-ctl -d $CAMERA_DEV --get-ctrl=exposure,gain,analogue_gain
 
-# Zwiększ gain (wzmocnienie)
-echo "2. Ustawianie gain na sensorze..."
-# Dla IMX219: analogue_gain range zazwyczaj 0-232
-v4l2-ctl -d $SENSOR_DEV --set-ctrl=analogue_gain=100
+# Zwiększ exposure (zakres: 0-4095, default=1575)
+echo -e "\n1. Ustawianie exposure=2500..."
+v4l2-ctl -d $CAMERA_DEV --set-ctrl=exposure=2500
 
-# Możliwe dodatkowe kontrolki
-echo "3. Próba ustawienia digital gain..."
-v4l2-ctl -d $SENSOR_DEV --set-ctrl=digital_gain=256 2>/dev/null || echo "  (digital_gain niedostępny)"
+# WAŻNE: Zwiększ gain (zakres: 256-43663, default=256 - MINIMUM!)
+echo "2. Ustawianie gain=5000..."
+v4l2-ctl -d $CAMERA_DEV --set-ctrl=gain=5000
 
-# Wyłącz test pattern jeśli włączony
+# Zwiększ analogue_gain (zakres: 256-2816, default=512)
+echo "3. Ustawianie analogue_gain=1500..."
+v4l2-ctl -d $CAMERA_DEV --set-ctrl=analogue_gain=1500
+
+# Wyłącz test pattern
 echo "4. Wyłączanie test pattern..."
-v4l2-ctl -d $SENSOR_DEV --set-ctrl=test_pattern=0 2>/dev/null || echo "  (test_pattern niedostępny)"
+v4l2-ctl -d $CAMERA_DEV --set-ctrl=test_pattern=0
 
-echo -e "\n=== Obecne ustawienia sensora ==="
-v4l2-ctl -d $SENSOR_DEV --list-ctrls
-v4l2-ctl -d $SENSOR_DEV --all
+echo -e "\n=== Nowe wartości (po zmianie) ==="
+v4l2-ctl -d $CAMERA_DEV --get-ctrl=exposure,gain,analogue_gain
 
 echo -e "\n=== Test: robienie zdjęcia ==="
 gst-launch-1.0 v4l2src device=/dev/video0 num-buffers=1 ! \
     video/x-raw,width=640,height=480 ! videoconvert ! jpegenc ! \
-    filesink location=test_fixed.jpg
+    filesink location=test_fixed.jpg 2>&1 | grep -v "Setting pipeline"
 
-echo -e "\nZdjęcie zapisane jako test_fixed.jpg"
+echo -e "\n✓ Zdjęcie zapisane jako test_fixed.jpg"
+echo "Sprawdź czy jest jaśniejsze!"
