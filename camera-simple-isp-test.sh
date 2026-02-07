@@ -5,10 +5,10 @@ CAMERA_DEV="/dev/video0"
 TEST_DIR="camera_tests"
 mkdir -p $TEST_DIR
 
-echo "=== Restart kamery (reset state) ==="
+#echo "=== Restart kamery (reset state) ==="
 # Reset media pipeline
-media-ctl -r 2>/dev/null
-sleep 0.5
+#media-ctl -r 2>/dev/null
+#sleep 0.5
 
 # Upewnij się że test_pattern jest wyłączony
 #v4l2-ctl -d $CAMERA_DEV --set-ctrl=test_pattern=0 2>/dev/null
