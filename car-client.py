@@ -34,6 +34,7 @@ UART_BAUD = int(os.getenv('UART_BAUD', '115200'))
 class V4L2CameraTrack(VideoStreamTrack):
     """
     Video track from V4L2 camera (Radxa Zero 3W with IMX219)
+    Uses PyAV for direct V4L2 access (can use HW encoder)
     """
     def __init__(self):
         super().__init__()
@@ -42,21 +43,28 @@ class V4L2CameraTrack(VideoStreamTrack):
         # Configure camera exposure/gain for optimal image quality
         self._configure_camera()
         
-        # Initialize video capture
+        # Initialize PyAV container for V4L2
         try:
-            import cv2
-            self.cap = cv2.VideoCapture(self.camera_dev, cv2.CAP_V4L2)
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, W)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, H)
-            self.cap.set(cv2.CAP_PROP_FPS, 30)
-            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'YUYV'))
+            import av
             
-            # Test read
-            ret, _ = self.cap.read()
-            if not ret:
-                raise Exception("Failed to read from camera")
+            # Open V4L2 device
+            options = {
+                'video_size': f'{W}x{H}',
+                'framerate': '30',
+                'input_format': 'yuyv422',  # or 'nv12' for HW encoding
+            }
             
-            logger.info(f"V4L2 Camera initialized: {W}x{H} @ 30fps")
+            self.container = av.open(
+                self.camera_dev,
+                format='v4l2',
+                mode='r',
+                options=options
+            )
+            
+            self.stream = self.container.streams.video[0]
+            self.stream.thread_type = 'AUTO'
+            
+            logger.info(f"V4L2 Camera initialized via PyAV: {W}x{H} @ 30fps")
             self.use_camera = True
             
         except Exception as e:
@@ -68,13 +76,13 @@ class V4L2CameraTrack(VideoStreamTrack):
         """Configure V4L2 camera controls for optimal quality"""
         import subprocess
         try:
-            # Optimal settings based on tests: exposure=3000, gain=6000, analogue_gain=1600
+            # Optimal settings: exposure=3000, gain=6000, analogue_gain=1600
             subprocess.run([
                 'v4l2-ctl', '-d', self.camera_dev,
                 '--set-ctrl=exposure=3000',
                 '--set-ctrl=gain=6000',
                 '--set-ctrl=analogue_gain=1600'
-            ], check=False, capture_output=True)
+            ], check=False, capture_output=True, timeout=2)
             logger.info("Camera configured: exposure=3000, gain=6000, analogue_gain=1600")
         except Exception as e:
             logger.warning(f"Could not configure camera: {e}")
@@ -86,51 +94,62 @@ class V4L2CameraTrack(VideoStreamTrack):
         pts, time_base = await self.next_timestamp()
         
         if self.use_camera:
-            import cv2
-            # Read frame from camera
-            ret, frame_bgr = self.cap.read()
-            
-            if not ret:
-                logger.error("Failed to read frame from camera")
+            try:
+                # Read frame from V4L2 via PyAV
+                for packet in self.container.demux(self.stream):
+                    for frame in packet.decode():
+                        # Convert to RGB if needed
+                        if frame.format.name != 'rgb24':
+                            frame = frame.to_rgb()
+                        
+                        # Set PTS
+                        frame.pts = pts
+                        frame.time_base = time_base
+                        
+                        # FPS monitoring
+                        current_time = time.time()
+                        if not hasattr(self, 'last_log_time'):
+                            self.last_log_time = current_time
+                            self.frames_since_log = 0
+                        
+                        self.frames_since_log += 1
+                        time_elapsed = current_time - self.last_log_time
+                        
+                        if time_elapsed >= 5.0:
+                            actual_fps = self.frames_since_log / time_elapsed
+                            logger.info(f"Actual streaming FPS: {actual_fps:.2f}")
+                            self.last_log_time = current_time
+                            self.frames_since_log = 0
+                        
+                        return frame
+                        
+            except Exception as e:
+                logger.error(f"Error reading frame: {e}")
                 # Fallback to black frame
                 import numpy as np
-                frame_bgr = np.zeros((H, W, 3), dtype=np.uint8)
-            
-            # Convert BGR to RGB
-            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-            frame = VideoFrame.from_ndarray(frame_rgb, format="rgb24")
-            
-            # FPS monitoring
-            current_time = time.time()
-            if not hasattr(self, 'last_log_time'):
-                self.last_log_time = current_time
-                self.frames_since_log = 0
-            
-            self.frames_since_log += 1
-            time_elapsed = current_time - self.last_log_time
-            
-            if time_elapsed >= 5.0:
-                actual_fps = self.frames_since_log / time_elapsed
-                logger.info(f"Actual streaming FPS: {actual_fps:.2f}")
-                self.last_log_time = current_time
-                self.frames_since_log = 0
-        else:
-            # Test pattern fallback
-            import numpy as np
-            frame = VideoFrame.from_ndarray(
-                np.full((H, W, 3), self.counter % 256, dtype=np.uint8),
-                format="rgb24"
-            )
-            self.counter += 1
-            
+                frame = VideoFrame.from_ndarray(
+                    np.zeros((H, W, 3), dtype=np.uint8),
+                    format="rgb24"
+                )
+                frame.pts = pts
+                frame.time_base = time_base
+                return frame
+        
+        # Test pattern fallback
+        import numpy as np
+        frame = VideoFrame.from_ndarray(
+            np.full((H, W, 3), self.counter % 256, dtype=np.uint8),
+            format="rgb24"
+        )
+        self.counter += 1
         frame.pts = pts
         frame.time_base = time_base
         
         return frame
 
     def stop(self):
-        if self.use_camera and hasattr(self, 'cap'):
-            self.cap.release()
+        if self.use_camera and hasattr(self, 'container'):
+            self.container.close()
 
 
 def extract_mid_from_sdp(sdp, track_kind='video'):
