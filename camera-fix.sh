@@ -6,6 +6,10 @@ echo "=== Naprawianie ustawień kamery IMX219 ==="
 # Używamy /dev/video0 (działa równie dobrze jak subdev3)
 CAMERA_DEV="/dev/video0"
 
+# Stwórz folder na testy
+TEST_DIR="camera_tests"
+mkdir -p $TEST_DIR
+
 echo "Obecne wartości (przed zmianą):"
 v4l2-ctl -d $CAMERA_DEV --get-ctrl=exposure,gain,analogue_gain
 
@@ -31,7 +35,7 @@ v4l2-ctl -d $CAMERA_DEV --get-ctrl=exposure,gain,analogue_gain
 echo -e "\n=== Test: robienie zdjęcia ==="
 gst-launch-1.0 v4l2src device=/dev/video0 num-buffers=1 ! \
     video/x-raw,width=640,height=480 ! videoconvert ! jpegenc ! \
-    filesink location=test_fixed.jpg 2>&1 | grep -v "Setting pipeline"
+    filesink location=$TEST_DIR/test_fixed.jpg 2>&1 | grep -v "Setting pipeline"
 
-echo -e "\n✓ Zdjęcie zapisane jako test_fixed.jpg"
-echo "Sprawdź czy jest jaśniejsze!"
+echo -e "\n✓ Zdjęcie zapisane jako $TEST_DIR/test_fixed.jpg"
+echo "Pobierz folder: scp -r user@radxa:$TEST_DIR ."

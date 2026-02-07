@@ -2,6 +2,8 @@
 # Szybki test - maksymalne wartości dla najjaśniejszego obrazu
 
 CAMERA_DEV="/dev/video0"
+TEST_DIR="camera_tests"
+mkdir -p $TEST_DIR
 
 echo "=== Test maksymalnych wartości (najbardziej jasny obraz) ==="
 
@@ -17,7 +19,7 @@ sleep 0.3
 
 gst-launch-1.0 v4l2src device=/dev/video0 num-buffers=1 ! \
     video/x-raw,width=640,height=480 ! videoconvert ! jpegenc ! \
-    filesink location=test_max_brightness.jpg 2>&1 | grep -v "Setting pipeline"
+    filesink location=$TEST_DIR/test_max_brightness.jpg 2>&1 | grep -v "Setting pipeline"
 
-echo -e "\n✓ test_max_brightness.jpg"
-echo "Jeśli to jest jasne, zmniejsz wartości dla mniejszego szumu"
+echo -e "\n✓ $TEST_DIR/test_max_brightness.jpg"
+echo "Pobierz folder: scp -r user@radxa:$TEST_DIR ."
