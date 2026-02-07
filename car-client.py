@@ -34,26 +34,65 @@ UART_BAUD = int(os.getenv('UART_BAUD', '115200'))
 class V4L2CameraTrack(VideoStreamTrack):
     """
     Video track from V4L2 camera (Radxa Zero 3W with IMX219)
-    Minimal setup with defaults
+    Uses GStreamer pipeline for proper camera support
     """
     def __init__(self):
         super().__init__()
         
-        # Minimal V4L2 capture - no configuration, just open and read
+        # Use GStreamer pipeline for Radxa camera
         try:
             import cv2
+            import subprocess
             
-            # Try /dev/video0 directly
-            self.cap = cv2.VideoCapture("/dev/video0")
+            # Find the correct video device (IMX219 sensor)
+            video_devices = []
+            for i in range(10):
+                device = f"/dev/video{i}"
+                if os.path.exists(device):
+                    video_devices.append(device)
+            
+            logger.info(f"Found video devices: {video_devices}")
+            
+            # Try to find the capture device (not the encoder devices)
+            camera_device = "/dev/video0"
+            for device in video_devices:
+                try:
+                    # Check if this is a capture device
+                    result = subprocess.run(
+                        ['v4l2-ctl', '--device', device, '--list-formats-ext'],
+                        capture_output=True, text=True, timeout=1
+                    )
+                    if 'YUYV' in result.stdout or 'MJPG' in result.stdout or 'NV12' in result.stdout:
+                        camera_device = device
+                        logger.info(f"Selected camera device: {device}")
+                        break
+                except:
+                    pass
+            
+            # GStreamer pipeline for Radxa with IMX219
+            # This pipeline works with most V4L2 cameras including IMX219
+            gst_pipeline = (
+                f"v4l2src device={camera_device} ! "
+                f"video/x-raw,width={W},height={H},framerate=30/1 ! "
+                f"videoconvert ! "
+                f"appsink"
+            )
+            
+            logger.info(f"Using GStreamer pipeline: {gst_pipeline}")
+            
+            # Open with GStreamer backend
+            self.cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
             
             if not self.cap.isOpened():
-                raise Exception("Failed to open /dev/video0")
+                raise Exception(f"Failed to open GStreamer pipeline")
             
-            logger.info(f"V4L2 Camera opened successfully")
+            logger.info(f"Camera opened successfully with GStreamer")
             self.use_camera = True
             
         except Exception as e:
             logger.warning(f"Camera not available: {e}, using test pattern")
+            logger.warning(f"Make sure GStreamer and v4l-utils are installed:")
+            logger.warning(f"  sudo apt-get install gstreamer1.0-tools gstreamer1.0-plugins-* v4l-utils")
             self.use_camera = False
             self.counter = 0
 
