@@ -24,6 +24,9 @@ CLOUDFLARE_API_BASE = 'https://rtc.live.cloudflare.com/v1'
 W=640
 H=480
 
+# Preferred video device (use /dev/video1 for selfpath if mainpath has issues)
+PREFERRED_VIDEO_DEVICE = os.getenv('VIDEO_DEVICE', '/dev/video0')
+
 # Signaling server configuration
 SIGNALING_SERVER = os.getenv('SIGNALING_SERVER', 'https://79-76-127-159.nip.io')
 
@@ -66,6 +69,14 @@ class V4L2CameraTrack(VideoStreamTrack):
                     )
                     logger.info(f"\n{device} formats:\n{result.stdout[:500]}")
                     
+                    # Also check FPS capability for 640x480
+                    fps_result = subprocess.run(
+                        ['v4l2-ctl', '--device', device, '--list-frameintervals', f'width={W},height={H},pixelformat=UYVY'],
+                        capture_output=True, text=True, timeout=1
+                    )
+                    if fps_result.returncode == 0 and fps_result.stdout:
+                        logger.info(f"{device} FPS for {W}x{H}: {fps_result.stdout.strip()}")
+                    
                     # Prefer MJPEG if available (usually more reliable)
                     if 'MJPG' in result.stdout or 'Motion-JPEG' in result.stdout:
                         camera_device = device
@@ -73,20 +84,23 @@ class V4L2CameraTrack(VideoStreamTrack):
                         logger.info(f"Selected {device} with MJPEG format")
                         break
                     elif 'UYVY' in result.stdout or 'YUYV' in result.stdout:
-                        camera_device = device
-                        camera_format = 'yuyv'
-                        logger.info(f"Selected {device} with UYVY/YUYV format")
-                        break
+                        # Check if this device has better FPS capability
+                        if '30' in fps_result.stdout or not camera_format:
+                            camera_device = device
+                            camera_format = 'yuyv'
+                            logger.info(f"Selected {device} with UYVY/YUYV format")
+                            if '30' in fps_result.stdout:
+                                break  # Found one with 30 FPS support
                     elif 'NV12' in result.stdout:
-                        camera_device = device
-                        camera_format = 'nv12'
-                        logger.info(f"Selected {device} with NV12 format")
-                        break
+                        if not camera_format:
+                            camera_device = device
+                            camera_format = 'nv12'
+                            logger.info(f"Selected {device} with NV12 format")
                     elif 'YUV' in result.stdout:
-                        camera_device = device
-                        camera_format = 'yuyv'
-                        logger.info(f"Selected {device} with YUV format")
-                        break
+                        if not camera_format:
+                            camera_device = device
+                            camera_format = 'yuyv'
+                            logger.info(f"Selected {device} with YUV format")
                 except Exception as e:
                     logger.debug(f"Could not check {device}: {e}")
             
@@ -114,23 +128,84 @@ class V4L2CameraTrack(VideoStreamTrack):
                     f"v4l2src device={camera_device} ! video/x-raw,format=YUYV,width={W},height={H},framerate=30/1 ! videoconvert ! appsink",
                 ])
             
+            # Try to increase FPS using media-ctl (for Rockchip ISP)
+            try:
+                # First, try to find the sensor subdev
+                media_result = subprocess.run(
+                    ['media-ctl', '-d', '/dev/media0', '-p'],
+                    timeout=2, capture_output=True, text=True
+                )
+                
+                if media_result.returncode == 0:
+                    # Look for IMX219 sensor entity
+                    sensor_entity = None
+                    for line in media_result.stdout.split('\n'):
+                        if 'imx219' in line.lower() and 'entity' in line.lower():
+                            # Extract entity name like "m00_b_imx219 2-0010"
+                            if ':' in line:
+                                parts = line.split(':')
+                                if len(parts) > 1:
+                                    sensor_entity = parts[1].split('(')[0].strip()
+                                    break
+                    
+                    if sensor_entity:
+                        logger.info(f"Found sensor: {sensor_entity}")
+                        
+                        # Try to set 30 FPS on sensor (1/30 = 30 FPS)
+                        # Format: [fmt:SRGGB10_1X10/3280x2464@1/30]
+                        for fps_frac in ['1/30', '1000/30000', '100/3000']:
+                            try:
+                                subprocess.run([
+                                    'media-ctl', '-d', '/dev/media0',
+                                    '--set-v4l2', f'"{sensor_entity}":0[fmt:SRGGB10_1X10/3280x2464@{fps_frac}]'
+                                ], timeout=2, capture_output=True, check=False)
+                                
+                                # Verify it worked
+                                verify = subprocess.run(
+                                    ['media-ctl', '-d', '/dev/media0', '-p'],
+                                    timeout=2, capture_output=True, text=True
+                                )
+                                if fps_frac.replace('/', '') in verify.stdout.replace('/', ''):
+                                    logger.info(f"✓ Set sensor to {fps_frac} FPS")
+                                    break
+                            except:
+                                pass
+                        
+                        # Optimize exposure for speed
+                        subprocess.run([
+                            'v4l2-ctl', '--device', camera_device,
+                            '--set-ctrl', 'exposure=500'
+                        ], timeout=1, capture_output=True)
+                        
+                        subprocess.run([
+                            'v4l2-ctl', '--device', camera_device,
+                            '--set-ctrl', 'gain=10000'
+                        ], timeout=1, capture_output=True)
+                        
+                        logger.info("Camera optimized for higher FPS")
+                    else:
+                        logger.warning("Could not find IMX219 sensor in media-ctl")
+                        
+            except FileNotFoundError:
+                logger.warning("media-ctl not available - install with: sudo apt-get install v4l-utils")
+            except Exception as e:
+                logger.warning(f"Could not optimize camera FPS: {e}")
+            
             # Specific pipelines for Radxa/Rockchip multiplanar devices
-            # Try without framerate first - let camera use maximum
+            # Use minimal buffering and force 30 FPS
             pipelines.extend([
-                # UYVY without framerate constraint - let camera choose best
-                f"v4l2src device={camera_device} io-mode=mmap ! video/x-raw,format=UYVY,width={W},height={H} ! videoconvert ! video/x-raw,format=BGR ! appsink drop=true max-buffers=2",
-                f"v4l2src device={camera_device} ! video/x-raw,format=UYVY,width={W},height={H} ! videoconvert ! video/x-raw,format=BGR ! appsink max-buffers=3",
-                f"v4l2src device={camera_device} ! video/x-raw,format=UYVY,width={W},height={H} ! videoconvert ! appsink",
-                # Then with 30 FPS
-                f"v4l2src device={camera_device} ! video/x-raw,format=UYVY,width={W},height={H},framerate=30/1 ! videoconvert ! video/x-raw,format=BGR ! appsink",
+                # Force 30 FPS with minimal buffering and sync=false
+                f"v4l2src device={camera_device} ! video/x-raw,format=UYVY,width={W},height={H},framerate=30/1 ! videoconvert ! video/x-raw,format=BGR ! appsink sync=false drop=true max-buffers=1",
+                f"v4l2src device={camera_device} ! video/x-raw,format=UYVY,width={W},height={H},framerate=30/1 ! videoconvert ! appsink sync=false max-buffers=2",
+                # Without BGR conversion  
+                f"v4l2src device={camera_device} ! video/x-raw,format=UYVY,width={W},height={H},framerate=30/1 ! videoconvert ! appsink max-buffers=2",
+                # Let camera choose FPS
+                f"v4l2src device={camera_device} ! video/x-raw,format=UYVY,width={W},height={H} ! videoconvert ! appsink max-buffers=2",
                 # NV12 variants
-                f"v4l2src device={camera_device} ! video/x-raw,format=NV12,width={W},height={H} ! videoconvert ! appsink max-buffers=3",
-                f"v4l2src device={camera_device} ! video/x-raw,format=NV12,width={W},height={H},framerate=30/1 ! videoconvert ! appsink",
-                # Generic with auto-negotiation
-                f"v4l2src device={camera_device} ! video/x-raw,width={W},height={H} ! videoconvert ! appsink",
+                f"v4l2src device={camera_device} ! video/x-raw,format=NV12,width={W},height={H},framerate=30/1 ! videoconvert ! appsink sync=false max-buffers=2",
+                f"v4l2src device={camera_device} ! video/x-raw,format=NV12,width={W},height={H} ! videoconvert ! appsink max-buffers=2",
+                # Generic
                 f"v4l2src device={camera_device} ! video/x-raw,width={W},height={H},framerate=30/1 ! videoconvert ! appsink",
-                # Last resort - let GStreamer figure it out
-                f"v4l2src device={camera_device} ! videoconvert ! video/x-raw,width={W},height={H},format=BGR ! appsink",
             ])
             
             # Try each pipeline
@@ -190,20 +265,36 @@ class V4L2CameraTrack(VideoStreamTrack):
                 frame.pts = pts
                 frame.time_base = time_base
                 
-                # FPS monitoring
+                # FPS monitoring - separate camera FPS from WebRTC FPS
                 current_time = time.time()
                 if not hasattr(self, 'last_log_time'):
                     self.last_log_time = current_time
                     self.frames_since_log = 0
+                    self.last_frame_time = current_time
+                    self.frame_intervals = []
+                
+                # Track actual frame intervals
+                frame_interval = current_time - self.last_frame_time
+                self.frame_intervals.append(frame_interval)
+                self.last_frame_time = current_time
                 
                 self.frames_since_log += 1
                 time_elapsed = current_time - self.last_log_time
                 
                 if time_elapsed >= 5.0:
                     actual_fps = self.frames_since_log / time_elapsed
-                    logger.info(f"Actual streaming FPS: {actual_fps:.2f}")
+                    
+                    # Calculate average frame interval for more accurate FPS
+                    if len(self.frame_intervals) > 10:
+                        avg_interval = sum(self.frame_intervals[-30:]) / min(30, len(self.frame_intervals))
+                        interval_fps = 1.0 / avg_interval if avg_interval > 0 else 0
+                        logger.info(f"Camera FPS: {actual_fps:.2f} | Interval-based: {interval_fps:.2f} | Avg interval: {avg_interval*1000:.1f}ms")
+                    else:
+                        logger.info(f"Camera streaming FPS: {actual_fps:.2f}")
+                    
                     self.last_log_time = current_time
                     self.frames_since_log = 0
+                    self.frame_intervals = []
                 
                 return frame
                 
