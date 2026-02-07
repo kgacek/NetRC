@@ -115,16 +115,20 @@ class V4L2CameraTrack(VideoStreamTrack):
                 ])
             
             # Specific pipelines for Radxa/Rockchip multiplanar devices
+            # Try without framerate first - let camera use maximum
             pipelines.extend([
-                # UYVY is first in format list - try it first
-                f"v4l2src device={camera_device} ! video/x-raw,format=UYVY,width={W},height={H},framerate=30/1 ! videoconvert ! video/x-raw,format=BGR ! appsink",
+                # UYVY without framerate constraint - let camera choose best
+                f"v4l2src device={camera_device} io-mode=mmap ! video/x-raw,format=UYVY,width={W},height={H} ! videoconvert ! video/x-raw,format=BGR ! appsink drop=true max-buffers=2",
+                f"v4l2src device={camera_device} ! video/x-raw,format=UYVY,width={W},height={H} ! videoconvert ! video/x-raw,format=BGR ! appsink max-buffers=3",
                 f"v4l2src device={camera_device} ! video/x-raw,format=UYVY,width={W},height={H} ! videoconvert ! appsink",
-                # Then NV12
+                # Then with 30 FPS
+                f"v4l2src device={camera_device} ! video/x-raw,format=UYVY,width={W},height={H},framerate=30/1 ! videoconvert ! video/x-raw,format=BGR ! appsink",
+                # NV12 variants
+                f"v4l2src device={camera_device} ! video/x-raw,format=NV12,width={W},height={H} ! videoconvert ! appsink max-buffers=3",
                 f"v4l2src device={camera_device} ! video/x-raw,format=NV12,width={W},height={H},framerate=30/1 ! videoconvert ! appsink",
-                f"v4l2src device={camera_device} ! video/x-raw,format=NV12,width={W},height={H} ! videoconvert ! appsink",
                 # Generic with auto-negotiation
-                f"v4l2src device={camera_device} ! video/x-raw,width={W},height={H},framerate=30/1 ! videoconvert ! appsink",
                 f"v4l2src device={camera_device} ! video/x-raw,width={W},height={H} ! videoconvert ! appsink",
+                f"v4l2src device={camera_device} ! video/x-raw,width={W},height={H},framerate=30/1 ! videoconvert ! appsink",
                 # Last resort - let GStreamer figure it out
                 f"v4l2src device={camera_device} ! videoconvert ! video/x-raw,width={W},height={H},format=BGR ! appsink",
             ])

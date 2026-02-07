@@ -110,7 +110,7 @@
         
         <div class="controls">
             <input type="text" id="appId" placeholder="Cloudflare App ID" />
-            <input type="text" id="appSecret" placeholder="Cloudflare App Secret" />
+            <input type="password" id="appSecret" placeholder="Cloudflare App Secret" />
             <input type="text" id="signalingServer" placeholder="Signaling Server" value="https://79-76-127-159.nip.io" />
             <button class="refresh-btn" onclick="loadSessions()">Refresh Sessions</button>
         </div>
@@ -146,6 +146,17 @@
         let mySessionId = null;
         let myControlSessionId = null;
         let selectedSessionId = null;
+        
+        // Load saved credentials on page load
+        window.addEventListener('DOMContentLoaded', () => {
+            const savedAppId = localStorage.getItem('cf_app_id');
+            const savedAppSecret = localStorage.getItem('cf_app_secret');
+            const savedSignalingServer = localStorage.getItem('signaling_server');
+            
+            if (savedAppId) document.getElementById('appId').value = savedAppId;
+            if (savedAppSecret) document.getElementById('appSecret').value = savedAppSecret;
+            if (savedSignalingServer) document.getElementById('signalingServer').value = savedSignalingServer;
+        });
         
         // Car control state
         let throttle = 0;
@@ -238,11 +249,17 @@
             const appId = document.getElementById('appId').value.trim();
             const appSecret = document.getElementById('appSecret').value.trim();
             const rpiSessionId = document.getElementById('sessionId').value.trim();
+            const signalingServer = document.getElementById('signalingServer').value.trim();
 
             if (!appId || !appSecret || !rpiSessionId) {
                 updateStatus('Please fill in all fields', 'error');
                 return;
             }
+            
+            // Save credentials to localStorage
+            localStorage.setItem('cf_app_id', appId);
+            localStorage.setItem('cf_app_secret', appSecret);
+            localStorage.setItem('signaling_server', signalingServer);
             
             // IMPORTANT: Disconnect old connections first
             if (peerConnection || controlConnection) {
