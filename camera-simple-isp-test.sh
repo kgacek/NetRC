@@ -11,7 +11,7 @@ media-ctl -r 2>/dev/null
 sleep 0.5
 
 # Upewnij się że test_pattern jest wyłączony
-v4l2-ctl -d $CAMERA_DEV --set-ctrl=test_pattern=0 2>/dev/null
+#v4l2-ctl -d $CAMERA_DEV --set-ctrl=test_pattern=0 2>/dev/null
 v4l2-ctl -d $CAMERA_DEV --set-ctrl=exposure=4095,gain=15000,analogue_gain=2800
 
 echo -e "\n=== TEST 1: Normalne zdjęcie (sprawdzenie czy działa) ==="
