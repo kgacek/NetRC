@@ -34,7 +34,7 @@ UART_BAUD = int(os.getenv('UART_BAUD', '115200'))
 class V4L2CameraTrack(VideoStreamTrack):
     """
     Video track from V4L2 camera (Radxa Zero 3W with IMX219)
-    Uses GStreamer pipeline for HW accelerated capture
+    Uses OpenCV with GStreamer backend for HW accelerated capture
     """
     def __init__(self):
         super().__init__()
@@ -43,32 +43,23 @@ class V4L2CameraTrack(VideoStreamTrack):
         # Configure camera exposure/gain for optimal image quality
         self._configure_camera()
         
-        # Create GStreamer pipeline
+        # Create GStreamer pipeline for OpenCV
         try:
-            from aiortc.contrib.media import MediaPlayer
+            import cv2
             
-            # GStreamer pipeline: v4l2 capture -> raw video
-            pipeline = (
+            # GStreamer pipeline optimized for low latency
+            gst_pipeline = (
                 f"v4l2src device={self.camera_dev} ! "
-                f"video/x-raw,width={W},height={H},framerate=30/1 ! "
+                f"video/x-raw,width={W},height={H},framerate=30/1,format=YUY2 ! "
                 "videoconvert ! "
-                "appsink name=sink emit-signals=true max-buffers=1 drop=true"
+                "video/x-raw,format=BGR ! "
+                "appsink drop=1"
             )
             
-            self.player = MediaPlayer(
-                pipeline,
-                format='gstreamer',
-                options={'fflags': 'nobuffer', 'flags': 'low_delay'}
-            )
+            self.cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
             
-            # Get video track from player
-            self.video_track = None
-            for track in self.player.video.tracks:
-                self.video_track = track
-                break
-            
-            if not self.video_track:
-                raise Exception("No video track in GStreamer pipeline")
+            if not self.cap.isOpened():
+                raise Exception("Failed to open GStreamer pipeline")
             
             logger.info(f"V4L2 Camera initialized via GStreamer: {W}x{H} @ 30fps")
             self.use_camera = True
@@ -105,6 +96,23 @@ class V4L2CameraTrack(VideoStreamTrack):
                 frame = await self.video_track.recv()
                 
                 # Update PTS
+                frame.pts = pts
+                frame.time_base = time_base
+                
+                # FPS moni:
+            try:
+                # Read frame from camera
+                ret, frame_bgr = self.cap.read()
+                
+                if not ret:
+                    raise Exception("Failed to read frame")
+                
+                # Convert BGR to RGB
+                import cv2
+                frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                
+                # Create VideoFrame
+                frame = VideoFrame.from_ndarray(frame_rgb, format="rgb24")
                 frame.pts = pts
                 frame.time_base = time_base
                 
@@ -150,18 +158,8 @@ class V4L2CameraTrack(VideoStreamTrack):
         return frame
 
     def stop(self):
-        if self.use_camera and hasattr(self, 'player'):
-            if hasattr(self.player, 'video'):
-                self.player.video.stop()
-
-
-def extract_mid_from_sdp(sdp, track_kind='video'):
-    """
-    Extract mid (media stream ID) from SDP for specific track kind
-    """
-    lines = sdp.split('\n')
-    current_mid = None
-    current_kind = None
+        if self.use_camera and hasattr(self, 'cap'):
+            self.cap.release
     
     for line in lines:
         if line.startswith('a=mid:'):
