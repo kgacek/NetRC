@@ -150,7 +150,14 @@ class V4L2CameraTrack(VideoStreamTrack):
 
     def stop(self):
         if self.use_camera and hasattr(self, 'cap'):
-            self.cap.release
+            self.cap.release()
+
+
+def extract_mid_from_sdp(sdp, track_kind='video'):
+    """Extract mid from SDP for specific track kind"""
+    lines = sdp.split('\n')
+    current_mid = None
+    current_kind = None
     
     for line in lines:
         if line.startswith('a=mid:'):
