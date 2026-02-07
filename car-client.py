@@ -53,8 +53,10 @@ class V4L2CameraTrack(VideoStreamTrack):
             
             logger.info(f"Found video devices: {video_devices}")
             
-            # Try to find the capture device (not the encoder devices)
+            # Try to find the capture device and detect format
             camera_device = "/dev/video0"
+            camera_format = None
+            
             for device in video_devices:
                 try:
                     # Check if this is a capture device
@@ -62,31 +64,96 @@ class V4L2CameraTrack(VideoStreamTrack):
                         ['v4l2-ctl', '--device', device, '--list-formats-ext'],
                         capture_output=True, text=True, timeout=1
                     )
-                    if 'YUYV' in result.stdout or 'MJPG' in result.stdout or 'NV12' in result.stdout:
+                    logger.info(f"\n{device} formats:\n{result.stdout[:500]}")
+                    
+                    # Prefer MJPEG if available (usually more reliable)
+                    if 'MJPG' in result.stdout or 'Motion-JPEG' in result.stdout:
                         camera_device = device
-                        logger.info(f"Selected camera device: {device}")
+                        camera_format = 'mjpeg'
+                        logger.info(f"Selected {device} with MJPEG format")
                         break
-                except:
-                    pass
+                    elif 'UYVY' in result.stdout or 'YUYV' in result.stdout:
+                        camera_device = device
+                        camera_format = 'yuyv'
+                        logger.info(f"Selected {device} with UYVY/YUYV format")
+                        break
+                    elif 'NV12' in result.stdout:
+                        camera_device = device
+                        camera_format = 'nv12'
+                        logger.info(f"Selected {device} with NV12 format")
+                        break
+                    elif 'YUV' in result.stdout:
+                        camera_device = device
+                        camera_format = 'yuyv'
+                        logger.info(f"Selected {device} with YUV format")
+                        break
+                except Exception as e:
+                    logger.debug(f"Could not check {device}: {e}")
             
-            # GStreamer pipeline for Radxa with IMX219
-            # This pipeline works with most V4L2 cameras including IMX219
-            gst_pipeline = (
-                f"v4l2src device={camera_device} ! "
-                f"video/x-raw,width={W},height={H},framerate=30/1 ! "
-                f"videoconvert ! "
-                f"appsink"
-            )
+            # Try different GStreamer pipelines based on detected format
+            # For Radxa with IMX219 - multiplanar device with UYVY/NV12 support
+            pipelines = []
             
-            logger.info(f"Using GStreamer pipeline: {gst_pipeline}")
+            if camera_format == 'mjpeg':
+                pipelines.extend([
+                    f"v4l2src device={camera_device} ! image/jpeg,width={W},height={H},framerate=30/1 ! jpegdec ! videoconvert ! appsink",
+                    f"v4l2src device={camera_device} ! image/jpeg,width={W},height={H} ! jpegdec ! videoconvert ! appsink",
+                ])
+            elif camera_format == 'nv12':
+                # Multiplanar NV12 format (common on Radxa/Rockchip)
+                pipelines.extend([
+                    f"v4l2src device={camera_device} ! video/x-raw,format=NV12,width={W},height={H},framerate=30/1 ! videoconvert ! video/x-raw,format=BGR ! appsink",
+                    f"v4l2src device={camera_device} ! video/x-raw,format=NV12,width={W},height={H} ! videoconvert ! video/x-raw,format=BGR ! appsink",
+                    f"v4l2src device={camera_device} io-mode=dmabuf ! video/x-raw,format=NV12,width={W},height={H},framerate=30/1 ! videoconvert ! appsink",
+                ])
+            elif camera_format == 'yuyv':
+                # UYVY/YUYV format
+                pipelines.extend([
+                    f"v4l2src device={camera_device} ! video/x-raw,format=UYVY,width={W},height={H},framerate=30/1 ! videoconvert ! video/x-raw,format=BGR ! appsink",
+                    f"v4l2src device={camera_device} ! video/x-raw,format=UYVY,width={W},height={H} ! videoconvert ! video/x-raw,format=BGR ! appsink",
+                    f"v4l2src device={camera_device} ! video/x-raw,format=YUYV,width={W},height={H},framerate=30/1 ! videoconvert ! appsink",
+                ])
             
-            # Open with GStreamer backend
-            self.cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
+            # Specific pipelines for Radxa/Rockchip multiplanar devices
+            pipelines.extend([
+                # UYVY is first in format list - try it first
+                f"v4l2src device={camera_device} ! video/x-raw,format=UYVY,width={W},height={H},framerate=30/1 ! videoconvert ! video/x-raw,format=BGR ! appsink",
+                f"v4l2src device={camera_device} ! video/x-raw,format=UYVY,width={W},height={H} ! videoconvert ! appsink",
+                # Then NV12
+                f"v4l2src device={camera_device} ! video/x-raw,format=NV12,width={W},height={H},framerate=30/1 ! videoconvert ! appsink",
+                f"v4l2src device={camera_device} ! video/x-raw,format=NV12,width={W},height={H} ! videoconvert ! appsink",
+                # Generic with auto-negotiation
+                f"v4l2src device={camera_device} ! video/x-raw,width={W},height={H},framerate=30/1 ! videoconvert ! appsink",
+                f"v4l2src device={camera_device} ! video/x-raw,width={W},height={H} ! videoconvert ! appsink",
+                # Last resort - let GStreamer figure it out
+                f"v4l2src device={camera_device} ! videoconvert ! video/x-raw,width={W},height={H},format=BGR ! appsink",
+            ])
             
-            if not self.cap.isOpened():
-                raise Exception(f"Failed to open GStreamer pipeline")
+            # Try each pipeline
+            self.cap = None
+            for gst_pipeline in pipelines:
+                try:
+                    logger.info(f"Trying pipeline: {gst_pipeline}")
+                    cap_test = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
+                    if cap_test.isOpened():
+                        # Test read
+                        ret, frame = cap_test.read()
+                        if ret and frame is not None:
+                            logger.info(f"✓ Pipeline works!")
+                            self.cap = cap_test
+                            break
+                        else:
+                            cap_test.release()
+                            logger.warning(f"✗ Pipeline opened but couldn't read frame")
+                    else:
+                        logger.warning(f"✗ Pipeline failed to open")
+                except Exception as e:
+                    logger.warning(f"✗ Pipeline error: {e}")
             
-            logger.info(f"Camera opened successfully with GStreamer")
+            if not self.cap or not self.cap.isOpened():
+                raise Exception(f"All GStreamer pipelines failed")
+            
+            logger.info(f"✓ Camera opened successfully with GStreamer")
             self.use_camera = True
             
         except Exception as e:
