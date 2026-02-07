@@ -34,59 +34,28 @@ UART_BAUD = int(os.getenv('UART_BAUD', '115200'))
 class V4L2CameraTrack(VideoStreamTrack):
     """
     Video track from V4L2 camera (Radxa Zero 3W with IMX219)
-    Uses OpenCV with GStreamer backend for HW accelerated capture
+    Minimal setup with defaults
     """
     def __init__(self):
         super().__init__()
-        self.camera_dev = "/dev/video0"
         
-        # Configure camera exposure/gain for optimal image quality
-        self._configure_camera()
-        
-        # Create V4L2 capture (simple, no GStreamer needed)
+        # Minimal V4L2 capture - no configuration, just open and read
         try:
             import cv2
             
-            # Direct V4L2 capture
-            self.cap = cv2.VideoCapture(self.camera_dev, cv2.CAP_V4L2)
+            # Try /dev/video0 directly
+            self.cap = cv2.VideoCapture("/dev/video0")
             
-            # Set resolution and format
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, W)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, H)
-            self.cap.set(cv2.CAP_PROP_FPS, 30)
-            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'YUYV'))
-            
-            # Verify it opened
             if not self.cap.isOpened():
-                raise Exception("Failed to open camera")
+                raise Exception("Failed to open /dev/video0")
             
-            # Test read
-            ret, _ = self.cap.read()
-            if not ret:
-                raise Exception("Failed to read test frame")
-            
-            logger.info(f"V4L2 Camera initialized: {W}x{H} @ 30fps")
+            logger.info(f"V4L2 Camera opened successfully")
             self.use_camera = True
             
         except Exception as e:
             logger.warning(f"Camera not available: {e}, using test pattern")
             self.use_camera = False
             self.counter = 0
-        
-    def _configure_camera(self):
-        """Configure V4L2 camera controls for optimal quality"""
-        import subprocess
-        try:
-            # Optimal settings: exposure=3000, gain=6000, analogue_gain=1600
-            subprocess.run([
-                'v4l2-ctl', '-d', self.camera_dev,
-                '--set-ctrl=exposure=3000',
-                '--set-ctrl=gain=6000',
-                '--set-ctrl=analogue_gain=1600'
-            ], check=False, capture_output=True, timeout=2)
-            logger.info("Camera configured: exposure=3000, gain=6000, analogue_gain=1600")
-        except Exception as e:
-            logger.warning(f"Could not configure camera: {e}")
 
     async def recv(self):
         """
