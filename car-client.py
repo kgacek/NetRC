@@ -44,6 +44,11 @@ class V4L2CameraTrack(VideoStreamTrack):
     def __init__(self):
         super().__init__()
         
+        # Set FPS to match camera capability (21 FPS max on Radxa with current driver)
+        # This prevents requesting frames faster than camera can provide
+        self._camera_fps = 21
+        self._start_time = None
+        
         # Use GStreamer pipeline for Radxa camera
         try:
             import cv2
@@ -245,10 +250,21 @@ class V4L2CameraTrack(VideoStreamTrack):
 
     async def recv(self):
         """
-        Generate video frames
+        Generate video frames at camera's native FPS (21 FPS)
         """
         recv_start = time.time()
-        pts, time_base = await self.next_timestamp()
+        
+        # Use custom timing based on camera FPS instead of default 30 FPS
+        if self._start_time is None:
+            self._start_time = time.time()
+            self._frame_count = 0
+        
+        self._frame_count += 1
+        
+        # Calculate pts based on camera FPS
+        pts = int(self._frame_count * (1 / self._camera_fps) * 90000)  # 90000 Hz clock rate
+        time_base = Fraction(1, 90000)
+        
         timestamp_time = time.time() - recv_start
         
         if self.use_camera:
