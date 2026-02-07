@@ -31,32 +31,53 @@ SIGNALING_SERVER = os.getenv('SIGNALING_SERVER', 'https://79-76-127-159.nip.io')
 UART_DEV = os.getenv('UART_DEV', '/dev/ttyS0')
 UART_BAUD = int(os.getenv('UART_BAUD', '115200'))
 
-class PiCameraTrack(VideoStreamTrack):
+class V4L2CameraTrack(VideoStreamTrack):
     """
-    Video track from Raspberry Pi Camera using picamera2
+    Video track from V4L2 camera (Radxa Zero 3W with IMX219)
     """
     def __init__(self):
         super().__init__()
-        try:
-            from picamera2 import Picamera2
-            
-            self.camera = Picamera2()
-            
-            # Configure camera for low latency streaming
-            config = self.camera.create_video_configuration(
-                main={"size": (W, H), "format": "BGR888"},
-                buffer_count=2
-            )
-            self.camera.configure(config)
-            self.camera.start()
-            
-            logger.info("Pi Camera initialized successfully")
-            
-        except ImportError:
-            logger.warning("picamera2 not available, using test pattern")
-            self.camera = None
+        self.camera_dev = "/dev/video0"
         
-        self.counter = 0
+        # Configure camera exposure/gain for optimal image quality
+        self._configure_camera()
+        
+        # Initialize video capture
+        try:
+            import cv2
+            self.cap = cv2.VideoCapture(self.camera_dev, cv2.CAP_V4L2)
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, W)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, H)
+            self.cap.set(cv2.CAP_PROP_FPS, 30)
+            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'YUYV'))
+            
+            # Test read
+            ret, _ = self.cap.read()
+            if not ret:
+                raise Exception("Failed to read from camera")
+            
+            logger.info(f"V4L2 Camera initialized: {W}x{H} @ 30fps")
+            self.use_camera = True
+            
+        except Exception as e:
+            logger.warning(f"Camera not available: {e}, using test pattern")
+            self.use_camera = False
+            self.counter = 0
+        
+    def _configure_camera(self):
+        """Configure V4L2 camera controls for optimal quality"""
+        import subprocess
+        try:
+            # Optimal settings based on tests: exposure=3000, gain=6000, analogue_gain=1600
+            subprocess.run([
+                'v4l2-ctl', '-d', self.camera_dev,
+                '--set-ctrl=exposure=3000',
+                '--set-ctrl=gain=6000',
+                '--set-ctrl=analogue_gain=1600'
+            ], check=False, capture_output=True)
+            logger.info("Camera configured: exposure=3000, gain=6000, analogue_gain=1600")
+        except Exception as e:
+            logger.warning(f"Could not configure camera: {e}")
 
     async def recv(self):
         """
@@ -64,12 +85,22 @@ class PiCameraTrack(VideoStreamTrack):
         """
         pts, time_base = await self.next_timestamp()
         
-        if self.camera:
-            # Capture frame from Pi Camera
-            frame_array = self.camera.capture_array()
-            frame = VideoFrame.from_ndarray(frame_array, format="rgb24")
+        if self.use_camera:
+            import cv2
+            # Read frame from camera
+            ret, frame_bgr = self.cap.read()
             
-            # FPS monitoring using actual wall clock time
+            if not ret:
+                logger.error("Failed to read frame from camera")
+                # Fallback to black frame
+                import numpy as np
+                frame_bgr = np.zeros((H, W, 3), dtype=np.uint8)
+            
+            # Convert BGR to RGB
+            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            frame = VideoFrame.from_ndarray(frame_rgb, format="rgb24")
+            
+            # FPS monitoring
             current_time = time.time()
             if not hasattr(self, 'last_log_time'):
                 self.last_log_time = current_time
@@ -78,13 +109,13 @@ class PiCameraTrack(VideoStreamTrack):
             self.frames_since_log += 1
             time_elapsed = current_time - self.last_log_time
             
-            if time_elapsed >= 5.0:  # Log every 5 seconds
+            if time_elapsed >= 5.0:
                 actual_fps = self.frames_since_log / time_elapsed
                 logger.info(f"Actual streaming FPS: {actual_fps:.2f}")
                 self.last_log_time = current_time
                 self.frames_since_log = 0
         else:
-            # Simple test pattern fallback
+            # Test pattern fallback
             import numpy as np
             frame = VideoFrame.from_ndarray(
                 np.full((H, W, 3), self.counter % 256, dtype=np.uint8),
@@ -98,9 +129,8 @@ class PiCameraTrack(VideoStreamTrack):
         return frame
 
     def stop(self):
-        if self.camera:
-            self.camera.stop()
-            self.camera.close()
+        if self.use_camera and hasattr(self, 'cap'):
+            self.cap.release()
 
 
 def extract_mid_from_sdp(sdp, track_kind='video'):
@@ -499,7 +529,7 @@ async def run_stream():
         
         # Add video track
         logger.info("Initializing camera...")
-        camera_track = PiCameraTrack()
+        camera_track = V4L2CameraTrack()
         pc.addTrack(camera_track)
         
         # Create offer
