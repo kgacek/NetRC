@@ -47,13 +47,12 @@ class V4L2CameraTrack(VideoStreamTrack):
         try:
             import cv2
             
-            # GStreamer pipeline optimized for low latency
+            # GStreamer pipeline - simplified, let videoconvert handle format
             gst_pipeline = (
                 f"v4l2src device={self.camera_dev} ! "
-                f"video/x-raw,width={W},height={H},framerate=30/1,format=YUY2 ! "
+                f"video/x-raw,width={W},height={H},framerate=30/1 ! "
                 "videoconvert ! "
-                "video/x-raw,format=BGR ! "
-                "appsink drop=1"
+                "appsink max-buffers=1 drop=true"
             )
             
             self.cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
