@@ -34,7 +34,7 @@ UART_BAUD = int(os.getenv('UART_BAUD', '115200'))
 class V4L2CameraTrack(VideoStreamTrack):
     """
     Video track from V4L2 camera (Radxa Zero 3W with IMX219)
-    Uses PyAV for direct V4L2 access (can use HW encoder)
+    Uses GStreamer pipeline for HW accelerated capture
     """
     def __init__(self):
         super().__init__()
@@ -43,28 +43,34 @@ class V4L2CameraTrack(VideoStreamTrack):
         # Configure camera exposure/gain for optimal image quality
         self._configure_camera()
         
-        # Initialize PyAV container for V4L2
+        # Create GStreamer pipeline
         try:
-            import av
+            from aiortc.contrib.media import MediaPlayer
             
-            # Open V4L2 device
-            options = {
-                'video_size': f'{W}x{H}',
-                'framerate': '30',
-                'input_format': 'yuyv422',  # or 'nv12' for HW encoding
-            }
-            
-            self.container = av.open(
-                self.camera_dev,
-                format='v4l2',
-                mode='r',
-                options=options
+            # GStreamer pipeline: v4l2 capture -> raw video
+            pipeline = (
+                f"v4l2src device={self.camera_dev} ! "
+                f"video/x-raw,width={W},height={H},framerate=30/1 ! "
+                "videoconvert ! "
+                "appsink name=sink emit-signals=true max-buffers=1 drop=true"
             )
             
-            self.stream = self.container.streams.video[0]
-            self.stream.thread_type = 'AUTO'
+            self.player = MediaPlayer(
+                pipeline,
+                format='gstreamer',
+                options={'fflags': 'nobuffer', 'flags': 'low_delay'}
+            )
             
-            logger.info(f"V4L2 Camera initialized via PyAV: {W}x{H} @ 30fps")
+            # Get video track from player
+            self.video_track = None
+            for track in self.player.video.tracks:
+                self.video_track = track
+                break
+            
+            if not self.video_track:
+                raise Exception("No video track in GStreamer pipeline")
+            
+            logger.info(f"V4L2 Camera initialized via GStreamer: {W}x{H} @ 30fps")
             self.use_camera = True
             
         except Exception as e:
@@ -93,36 +99,32 @@ class V4L2CameraTrack(VideoStreamTrack):
         """
         pts, time_base = await self.next_timestamp()
         
-        if self.use_camera:
+        if self.use_camera and self.video_track:
             try:
-                # Read frame from V4L2 via PyAV
-                for packet in self.container.demux(self.stream):
-                    for frame in packet.decode():
-                        # Convert to RGB if needed
-                        if frame.format.name != 'rgb24':
-                            frame = frame.to_rgb()
-                        
-                        # Set PTS
-                        frame.pts = pts
-                        frame.time_base = time_base
-                        
-                        # FPS monitoring
-                        current_time = time.time()
-                        if not hasattr(self, 'last_log_time'):
-                            self.last_log_time = current_time
-                            self.frames_since_log = 0
-                        
-                        self.frames_since_log += 1
-                        time_elapsed = current_time - self.last_log_time
-                        
-                        if time_elapsed >= 5.0:
-                            actual_fps = self.frames_since_log / time_elapsed
-                            logger.info(f"Actual streaming FPS: {actual_fps:.2f}")
-                            self.last_log_time = current_time
-                            self.frames_since_log = 0
-                        
-                        return frame
-                        
+                # Get frame from GStreamer pipeline
+                frame = await self.video_track.recv()
+                
+                # Update PTS
+                frame.pts = pts
+                frame.time_base = time_base
+                
+                # FPS monitoring
+                current_time = time.time()
+                if not hasattr(self, 'last_log_time'):
+                    self.last_log_time = current_time
+                    self.frames_since_log = 0
+                
+                self.frames_since_log += 1
+                time_elapsed = current_time - self.last_log_time
+                
+                if time_elapsed >= 5.0:
+                    actual_fps = self.frames_since_log / time_elapsed
+                    logger.info(f"Actual streaming FPS: {actual_fps:.2f}")
+                    self.last_log_time = current_time
+                    self.frames_since_log = 0
+                
+                return frame
+                
             except Exception as e:
                 logger.error(f"Error reading frame: {e}")
                 # Fallback to black frame
@@ -148,8 +150,9 @@ class V4L2CameraTrack(VideoStreamTrack):
         return frame
 
     def stop(self):
-        if self.use_camera and hasattr(self, 'container'):
-            self.container.close()
+        if self.use_camera and hasattr(self, 'player'):
+            if hasattr(self.player, 'video'):
+                self.player.video.stop()
 
 
 def extract_mid_from_sdp(sdp, track_kind='video'):
