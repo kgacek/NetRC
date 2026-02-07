@@ -21,8 +21,10 @@ CLOUDFLARE_APP_ID = os.getenv('CF_REALTIME_APP_ID', 'your-app-id')
 CLOUDFLARE_APP_SECRET = os.getenv('CF_REALTIME_TOKEN', 'your-app-secret')
 CLOUDFLARE_API_BASE = 'https://rtc.live.cloudflare.com/v1'
 
-W=640
-H=480
+# Native IMX219 resolution for potentially better FPS
+# Use environment variable to override: export VIDEO_WIDTH=640 VIDEO_HEIGHT=480
+W = int(os.getenv('VIDEO_WIDTH', '3280'))
+H = int(os.getenv('VIDEO_HEIGHT', '2464'))
 
 # Preferred video device (use /dev/video1 for selfpath if mainpath has issues)
 PREFERRED_VIDEO_DEVICE = os.getenv('VIDEO_DEVICE', '/dev/video0')
