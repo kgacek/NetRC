@@ -90,16 +90,7 @@ class V4L2CameraTrack(VideoStreamTrack):
         """
         pts, time_base = await self.next_timestamp()
         
-        if self.use_camera and self.video_track:
-            try:
-                # Get frame from GStreamer pipeline
-                frame = await self.video_track.recv()
-                
-                # Update PTS
-                frame.pts = pts
-                frame.time_base = time_base
-                
-                # FPS moni:
+        if self.use_camera:
             try:
                 # Read frame from camera
                 ret, frame_bgr = self.cap.read()
