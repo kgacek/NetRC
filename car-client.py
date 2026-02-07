@@ -194,20 +194,19 @@ class V4L2CameraTrack(VideoStreamTrack):
                 logger.warning(f"Could not optimize camera FPS: {e}")
             
             # Specific pipelines for Radxa/Rockchip multiplanar devices
-            # Use minimal buffering and force 30 FPS
+            # Optimized for maximum FPS (even if limited to 21 by hardware)
             pipelines.extend([
-                # Force 30 FPS with minimal buffering and sync=false
-                f"v4l2src device={camera_device} ! video/x-raw,format=UYVY,width={W},height={H},framerate=30/1 ! videoconvert ! video/x-raw,format=BGR ! appsink sync=false drop=true max-buffers=1",
-                f"v4l2src device={camera_device} ! video/x-raw,format=UYVY,width={W},height={H},framerate=30/1 ! videoconvert ! appsink sync=false max-buffers=2",
-                # Without BGR conversion  
-                f"v4l2src device={camera_device} ! video/x-raw,format=UYVY,width={W},height={H},framerate=30/1 ! videoconvert ! appsink max-buffers=2",
-                # Let camera choose FPS
+                # Minimal processing - no format conversion, no sync, minimal buffering
+                f"v4l2src device={camera_device} ! video/x-raw,format=UYVY,width={W},height={H} ! appsink sync=false emit-signals=false max-buffers=1 drop=true",
+                # With videoconvert but optimized
+                f"v4l2src device={camera_device} ! video/x-raw,format=UYVY,width={W},height={H} ! videoconvert n-threads=2 ! appsink sync=false max-buffers=2 drop=true",
+                # NV12 format (may be faster on some configs)
+                f"v4l2src device={camera_device} ! video/x-raw,format=NV12,width={W},height={H} ! videoconvert ! appsink sync=false max-buffers=2",
+                # With explicit framerate
+                f"v4l2src device={camera_device} ! video/x-raw,format=UYVY,width={W},height={H},framerate=21/1 ! videoconvert ! appsink sync=false max-buffers=2",
+                # Generic fallbacks
                 f"v4l2src device={camera_device} ! video/x-raw,format=UYVY,width={W},height={H} ! videoconvert ! appsink max-buffers=2",
-                # NV12 variants
-                f"v4l2src device={camera_device} ! video/x-raw,format=NV12,width={W},height={H},framerate=30/1 ! videoconvert ! appsink sync=false max-buffers=2",
-                f"v4l2src device={camera_device} ! video/x-raw,format=NV12,width={W},height={H} ! videoconvert ! appsink max-buffers=2",
-                # Generic
-                f"v4l2src device={camera_device} ! video/x-raw,width={W},height={H},framerate=30/1 ! videoconvert ! appsink",
+                f"v4l2src device={camera_device} ! video/x-raw,width={W},height={H} ! videoconvert ! appsink",
             ])
             
             # Try each pipeline
@@ -248,24 +247,32 @@ class V4L2CameraTrack(VideoStreamTrack):
         """
         Generate video frames
         """
+        recv_start = time.time()
         pts, time_base = await self.next_timestamp()
+        timestamp_time = time.time() - recv_start
         
         if self.use_camera:
             try:
+                read_start = time.time()
                 # Read frame from camera
                 ret, frame_bgr = self.cap.read()
+                read_time = time.time() - read_start
                 
                 if not ret:
                     raise Exception("Failed to read frame")
                 
+                convert_start = time.time()
                 # Convert BGR to RGB
                 import cv2
                 frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                convert_time = time.time() - convert_start
                 
+                create_start = time.time()
                 # Create VideoFrame
                 frame = VideoFrame.from_ndarray(frame_rgb, format="rgb24")
                 frame.pts = pts
                 frame.time_base = time_base
+                create_time = time.time() - create_start
                 
                 # FPS monitoring - separate camera FPS from WebRTC FPS
                 current_time = time.time()
@@ -290,7 +297,10 @@ class V4L2CameraTrack(VideoStreamTrack):
                     if len(self.frame_intervals) > 10:
                         avg_interval = sum(self.frame_intervals[-30:]) / min(30, len(self.frame_intervals))
                         interval_fps = 1.0 / avg_interval if avg_interval > 0 else 0
-                        logger.info(f"Camera FPS: {actual_fps:.2f} | Interval-based: {interval_fps:.2f} | Avg interval: {avg_interval*1000:.1f}ms")
+                        
+                        # Calculate average processing times
+                        logger.info(f"Camera FPS: {actual_fps:.2f} | Interval-based: {interval_fps:.2f}")
+                        logger.info(f"Timing - Read: {read_time*1000:.1f}ms | Convert: {convert_time*1000:.1f}ms | Create: {create_time*1000:.1f}ms | Total: {(read_time+convert_time+create_time)*1000:.1f}ms")
                     else:
                         logger.info(f"Camera streaming FPS: {actual_fps:.2f}")
                     
