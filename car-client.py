@@ -199,23 +199,24 @@ class V4L2CameraTrack(VideoStreamTrack):
                 logger.warning(f"Could not optimize camera FPS: {e}")
             
             # Specific pipelines for Radxa/Rockchip multiplanar devices
-            # Optimized for maximum FPS (even if limited to 21 by hardware)
+            # Optimized for MINIMUM latency - convert to RGB in GStreamer, not in Python
             pipelines.extend([
-                # Minimal processing - no format conversion, no sync, minimal buffering
+                # Best: Let GStreamer do ALL conversion to RGB, minimal Python overhead
+                f"v4l2src device={camera_device} ! video/x-raw,format=UYVY,width={W},height={H} ! videoconvert ! video/x-raw,format=RGB ! appsink sync=false emit-signals=false max-buffers=1 drop=true",
+                # Alternative: Direct UYVY with minimal buffering
                 f"v4l2src device={camera_device} ! video/x-raw,format=UYVY,width={W},height={H} ! appsink sync=false emit-signals=false max-buffers=1 drop=true",
-                # With videoconvert but optimized
-                f"v4l2src device={camera_device} ! video/x-raw,format=UYVY,width={W},height={H} ! videoconvert n-threads=2 ! appsink sync=false max-buffers=2 drop=true",
-                # NV12 format (may be faster on some configs)
-                f"v4l2src device={camera_device} ! video/x-raw,format=NV12,width={W},height={H} ! videoconvert ! appsink sync=false max-buffers=2",
-                # With explicit framerate
-                f"v4l2src device={camera_device} ! video/x-raw,format=UYVY,width={W},height={H},framerate=21/1 ! videoconvert ! appsink sync=false max-buffers=2",
-                # Generic fallbacks
+                # NV12 to RGB
+                f"v4l2src device={camera_device} ! video/x-raw,format=NV12,width={W},height={H} ! videoconvert ! video/x-raw,format=RGB ! appsink sync=false max-buffers=1 drop=true",
+                # Generic with RGB output
+                f"v4l2src device={camera_device} ! video/x-raw,format=UYVY,width={W},height={H} ! videoconvert ! video/x-raw,format=RGB ! appsink max-buffers=2",
+                # Fallback to BGR
+                f"v4l2src device={camera_device} ! video/x-raw,format=UYVY,width={W},height={H} ! videoconvert ! video/x-raw,format=BGR ! appsink max-buffers=2",
                 f"v4l2src device={camera_device} ! video/x-raw,format=UYVY,width={W},height={H} ! videoconvert ! appsink max-buffers=2",
-                f"v4l2src device={camera_device} ! video/x-raw,width={W},height={H} ! videoconvert ! appsink",
             ])
             
             # Try each pipeline
             self.cap = None
+            self.selected_pipeline = None
             for gst_pipeline in pipelines:
                 try:
                     logger.info(f"Trying pipeline: {gst_pipeline}")
@@ -226,6 +227,7 @@ class V4L2CameraTrack(VideoStreamTrack):
                         if ret and frame is not None:
                             logger.info(f"✓ Pipeline works!")
                             self.cap = cap_test
+                            self.selected_pipeline = gst_pipeline
                             break
                         else:
                             cap_test.release()
@@ -271,16 +273,37 @@ class V4L2CameraTrack(VideoStreamTrack):
             try:
                 read_start = time.time()
                 # Read frame from camera
-                ret, frame_bgr = self.cap.read()
+                ret, frame_data = self.cap.read()
                 read_time = time.time() - read_start
                 
                 if not ret:
                     raise Exception("Failed to read frame")
                 
                 convert_start = time.time()
-                # Convert BGR to RGB
-                import cv2
-                frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                
+                # Check if frame is already RGB (3 channels) or BGR
+                # If GStreamer pipeline outputs RGB, no conversion needed
+                if frame_data.shape[2] == 3:
+                    # Assume BGR from OpenCV by default, but check if it looks right
+                    # Quick heuristic: if pipeline said RGB, data is RGB
+                    if not hasattr(self, '_frame_format_detected'):
+                        # First frame - detect format
+                        self._frame_format_detected = True
+                        # We'll assume it's what we asked for in pipeline
+                        logger.info(f"Frame shape: {frame_data.shape}, assuming format based on pipeline")
+                    
+                    # If pipeline has 'format=RGB' in it, frame_data is already RGB
+                    # Otherwise it's BGR and needs conversion
+                    import cv2
+                    if hasattr(self, 'selected_pipeline') and 'format=RGB' in self.selected_pipeline:
+                        frame_rgb = frame_data  # Already RGB!
+                    else:
+                        frame_rgb = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGB)
+                else:
+                    # Unexpected format
+                    import cv2
+                    frame_rgb = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGB)
+                    
                 convert_time = time.time() - convert_start
                 
                 create_start = time.time()
