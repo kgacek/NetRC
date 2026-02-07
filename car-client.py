@@ -43,24 +43,29 @@ class V4L2CameraTrack(VideoStreamTrack):
         # Configure camera exposure/gain for optimal image quality
         self._configure_camera()
         
-        # Create GStreamer pipeline for OpenCV
+        # Create V4L2 capture (simple, no GStreamer needed)
         try:
             import cv2
             
-            # GStreamer pipeline - simplified, let videoconvert handle format
-            gst_pipeline = (
-                f"v4l2src device={self.camera_dev} ! "
-                f"video/x-raw,width={W},height={H},framerate=30/1 ! "
-                "videoconvert ! "
-                "appsink max-buffers=1 drop=true"
-            )
+            # Direct V4L2 capture
+            self.cap = cv2.VideoCapture(self.camera_dev, cv2.CAP_V4L2)
             
-            self.cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
+            # Set resolution and format
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, W)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, H)
+            self.cap.set(cv2.CAP_PROP_FPS, 30)
+            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'YUYV'))
             
+            # Verify it opened
             if not self.cap.isOpened():
-                raise Exception("Failed to open GStreamer pipeline")
+                raise Exception("Failed to open camera")
             
-            logger.info(f"V4L2 Camera initialized via GStreamer: {W}x{H} @ 30fps")
+            # Test read
+            ret, _ = self.cap.read()
+            if not ret:
+                raise Exception("Failed to read test frame")
+            
+            logger.info(f"V4L2 Camera initialized: {W}x{H} @ 30fps")
             self.use_camera = True
             
         except Exception as e:
