@@ -286,6 +286,8 @@ class GStreamerWebRTC:
             # Start pipeline
             self.start_pipeline()
             
+            logger.info("Pipeline started successfully!")
+            
             # Schedule negotiation after pipeline is ready
             logger.info("Scheduling negotiation in 2 seconds...")
             GLib.timeout_add(2000, self.trigger_negotiation)
