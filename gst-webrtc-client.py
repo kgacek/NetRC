@@ -100,31 +100,43 @@ class GStreamerWebRTC:
         element.emit('set-local-description', offer, promise)
         promise.interrupt()
         
-        # Store SDP and wait for ICE gathering to complete
-        # We'll send it to Cloudflare in on_ice_gathering_state when complete
-        logger.info("Local description set, waiting for ICE gathering...")
+        # Start polling for ICE gathering completion (signal doesn't fire reliably)
+        logger.info("Local description set, polling for ICE gathering completion...")
+        GLib.timeout_add(100, self.check_ice_gathering_state)
+    
+    def check_ice_gathering_state(self):
+        """Poll ICE gathering state and send offer when complete"""
+        if not self.webrtc:
+            return False  # Stop polling if webrtc is gone
+        
+        state = self.webrtc.get_property('ice-gathering-state')
+        logger.info(f"Polling ICE gathering state: {state}")
+        
+        if state == GstWebRTC.WebRTCICEGatheringState.COMPLETE:
+            logger.info("ICE gathering complete! Sending offer to Cloudflare...")
+            # Get current local description (now with ICE candidates)
+            local_desc = self.webrtc.get_property('local-description')
+            if local_desc:
+                sdp = local_desc.sdp.as_text()
+                # Run in a thread to not block GLib loop
+                import threading
+                threading.Thread(target=self.send_offer_to_cloudflare, args=(sdp,), daemon=True).start()
+                return False  # Stop polling
+            else:
+                logger.error("No local description available after ICE gathering")
+                return False
+        
+        # Continue polling every 100ms
+        return True
     
     def on_ice_candidate(self, element, mlineindex, candidate):
         """Handle ICE candidate - not needed with ice-lite server"""
         pass
     
     def on_ice_gathering_state(self, element, pspec):
-        """Monitor ICE gathering state and send offer when complete"""
+        """Monitor ICE gathering state (backup, polling is primary)"""
         state = element.get_property('ice-gathering-state')
-        logger.info(f"ICE gathering state: {state}")
-        
-        # When ICE gathering is complete, send offer to Cloudflare
-        if state == GstWebRTC.WebRTCICEGatheringState.COMPLETE:
-            logger.info("ICE gathering complete, sending offer to Cloudflare...")
-            # Get current local description (now with ICE candidates)
-            local_desc = element.get_property('local-description')
-            if local_desc:
-                sdp = local_desc.sdp.as_text()
-                # Run in a thread to not block GLib loop
-                import threading
-                threading.Thread(target=self.send_offer_to_cloudflare, args=(sdp,), daemon=True).start()
-            else:
-                logger.error("No local description available after ICE gathering")
+        logger.info(f"ICE gathering state changed (signal): {state}")
     
     def send_offer_to_cloudflare(self, offer_sdp):
         """Send offer to Cloudflare Calls API (synchronous)"""
