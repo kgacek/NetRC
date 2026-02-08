@@ -27,8 +27,8 @@ SIGNALING_SERVER = os.getenv('SIGNALING_SERVER', 'https://79-76-127-159.nip.io')
 # Video configuration
 WIDTH = 1920
 HEIGHT = 1080
-FRAMERATE = 30
-BITRATE = 2000000  # 2 Mbps for 1080p
+FRAMERATE = 15
+BITRATE = 1000000  # 1 Mbps for stability
 
 class GStreamerWebRTC:
     def __init__(self):
@@ -430,7 +430,7 @@ class GStreamerWebRTC:
             '--profile', 'baseline',
             '--level', '4',
             '--bitrate', str(BITRATE),
-            '--intra', '30',        # Force keyframe every 30 frames (~1s at 30fps)
+            '--intra', '15',        # Force keyframe every 15 frames (~1s at 15fps)
             '--inline',              # SPS/PPS in every keyframe
             '--flush',               # Low latency
             '--timeout', '0',        # Run indefinitely
