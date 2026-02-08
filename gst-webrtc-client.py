@@ -363,13 +363,8 @@ class GStreamerWebRTC:
         return False  # Don't repeat idle callback
     
     def start_rpicam(self):
-        """Start rpicam-vid process"""
+        """Start rpicam-vid process (FIFO already created)"""
         import subprocess
-        
-        # Create FIFO if it doesn't exist
-        if os.path.exists(self.fifo_path):
-            os.remove(self.fifo_path)
-        os.mkfifo(self.fifo_path)
         
         # Start rpicam-vid with hardware encoding in background
         self.rpicam_process = subprocess.Popen([
@@ -393,8 +388,12 @@ class GStreamerWebRTC:
     
     def create_and_start_pipeline(self):
         """Create and start GStreamer pipeline"""
-        try:
-            # Create pipeline first (before rpicam starts writing)
+        try:            # Create FIFO first (before creating pipeline with filesrc)
+            if os.path.exists(self.fifo_path):
+                os.remove(self.fifo_path)
+            os.mkfifo(self.fifo_path)
+            logger.info(f"Created FIFO at {self.fifo_path}")
+                        # Create pipeline first (before rpicam starts writing)
             self.create_pipeline()
             
             # Set pipeline to PAUSED (filesrc ready to read but not yet blocking)
