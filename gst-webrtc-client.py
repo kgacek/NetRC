@@ -96,20 +96,16 @@ class GStreamerWebRTC:
         reply = promise.get_reply()
         offer = reply.get_value('offer')
         
-        promise = Gst.Promise.new()
-        element.emit('set-local-description', offer, promise)
-        promise.wait()  # Wait for local description to be set
+        # Set local description in a separate promise
+        set_promise = Gst.Promise.new()
+        element.emit('set-local-description', offer, set_promise)
         
-        # With Cloudflare ice-lite, send offer immediately
+        # With Cloudflare ice-lite, send offer immediately without waiting for ICE gathering
         # Server will provide ICE candidates in the answer
-        logger.info("Local description set, sending offer to Cloudflare (ice-lite mode)...")
-        local_desc = element.get_property('local-description')
-        if local_desc:
-            sdp = local_desc.sdp.as_text()
-            import threading
-            threading.Thread(target=self.send_offer_to_cloudflare, args=(sdp,), daemon=True).start()
-        else:
-            logger.error("No local description available")
+        logger.info("Sending offer to Cloudflare (ice-lite mode)...")
+        sdp = offer.sdp.as_text()
+        import threading
+        threading.Thread(target=self.send_offer_to_cloudflare, args=(sdp,), daemon=True).start()
     
     def on_ice_candidate(self, element, mlineindex, candidate):
         """Handle ICE candidate - not needed with ice-lite server"""
