@@ -81,6 +81,9 @@ class GStreamerWebRTC:
         self.webrtc.connect('on-ice-candidate', self.on_ice_candidate)
         self.webrtc.connect('notify::ice-gathering-state', self.on_ice_gathering_state)
         
+        # Track ICE gathering state
+        self.pending_offer_sdp = None
+        
     def on_negotiation_needed(self, element):
         """Handle negotiation needed"""
         logger.info("Negotiation needed, creating offer...")
@@ -97,11 +100,31 @@ class GStreamerWebRTC:
         element.emit('set-local-description', offer, promise)
         promise.interrupt()
         
-        # Send offer to Cloudflare
-        sdp = offer.sdp.as_text()
-        # Run in a thread to not block GLib loop
-        import threading
-        threading.Thread(target=self.send_offer_to_cloudflare, args=(sdp,), daemon=True).start()
+        # Store SDP and wait for ICE gathering to complete
+        # We'll send it to Cloudflare in on_ice_gathering_state when complete
+        logger.info("Local description set, waiting for ICE gathering...")
+    
+    def on_ice_candidate(self, element, mlineindex, candidate):
+        """Handle ICE candidate - not needed with ice-lite server"""
+        pass
+    
+    def on_ice_gathering_state(self, element, pspec):
+        """Monitor ICE gathering state and send offer when complete"""
+        state = element.get_property('ice-gathering-state')
+        logger.info(f"ICE gathering state: {state}")
+        
+        # When ICE gathering is complete, send offer to Cloudflare
+        if state == GstWebRTC.WebRTCICEGatheringState.COMPLETE:
+            logger.info("ICE gathering complete, sending offer to Cloudflare...")
+            # Get current local description (now with ICE candidates)
+            local_desc = element.get_property('local-description')
+            if local_desc:
+                sdp = local_desc.sdp.as_text()
+                # Run in a thread to not block GLib loop
+                import threading
+                threading.Thread(target=self.send_offer_to_cloudflare, args=(sdp,), daemon=True).start()
+            else:
+                logger.error("No local description available after ICE gathering")
     
     def send_offer_to_cloudflare(self, offer_sdp):
         """Send offer to Cloudflare Calls API (synchronous)"""
@@ -173,15 +196,6 @@ class GStreamerWebRTC:
         promise.interrupt()
         
         logger.info("Remote description set, streaming started!")
-    
-    def on_ice_candidate(self, element, mlineindex, candidate):
-        """Handle ICE candidate - not needed with ice-lite server"""
-        pass
-    
-    def on_ice_gathering_state(self, element, pspec):
-        """Monitor ICE gathering state"""
-        state = element.get_property('ice-gathering-state')
-        logger.info(f"ICE gathering state: {state}")
     
     def start_pipeline(self):
         """Start the GStreamer pipeline"""
