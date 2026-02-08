@@ -260,6 +260,7 @@ class GStreamerWebRTC:
         
         # Monitor pipeline stats
         GLib.timeout_add_seconds(5, self.print_stats)
+        GLib.timeout_add_seconds(5, self.request_webrtc_stats)
 
     def ensure_fifo(self):
         """Ensure FIFO exists without removing it while in use"""
@@ -384,6 +385,42 @@ class GStreamerWebRTC:
                 logger.info(f"ICE connection state: {state}")
         
         return True  # Keep calling
+
+    def request_webrtc_stats(self):
+        """Request WebRTC stats from webrtcbin"""
+        if not self.webrtc:
+            return True
+        promise = Gst.Promise.new_with_change_func(self.on_webrtc_stats, None, None)
+        self.webrtc.emit('get-stats', None, promise)
+        return True
+
+    def on_webrtc_stats(self, promise, _unused, __):
+        """Log outbound RTP stats from webrtcbin"""
+        promise.wait()
+        reply = promise.get_reply()
+        stats = reply.get_value('stats')
+        if not stats:
+            return
+
+        # stats is a GstStructure with nested stats objects
+        # Log only outbound-rtp video to avoid noise
+        for i in range(stats.n_fields()):
+            field_name = stats.nth_field_name(i)
+            value = stats.get_value(field_name)
+            if not isinstance(value, Gst.Structure):
+                continue
+            if value.get_string('type') != 'outbound-rtp':
+                continue
+            if value.get_string('kind') != 'video':
+                continue
+
+            packets_sent = value.get_value('packets-sent')
+            bytes_sent = value.get_value('bytes-sent')
+            frames_sent = value.get_value('frames-encoded') or value.get_value('frames-sent')
+            rtt = value.get_value('round-trip-time')
+
+            logger.info(
+                f"WebRTC outbound stats: packets={packets_sent}, bytes={bytes_sent}, frames={frames_sent}, rtt={rtt}")
     
     def run(self):
         """Main run loop"""
