@@ -24,11 +24,11 @@ CLOUDFLARE_APP_SECRET = os.getenv('CF_REALTIME_TOKEN')
 CLOUDFLARE_API_BASE = 'https://rtc.live.cloudflare.com/v1'
 SIGNALING_SERVER = os.getenv('SIGNALING_SERVER', 'https://79-76-127-159.nip.io')
 
-# Video configuration (overridable via env)
-WIDTH = int(os.getenv('STREAM_WIDTH', '1920'))
-HEIGHT = int(os.getenv('STREAM_HEIGHT', '1080'))
-FRAMERATE = int(os.getenv('STREAM_FPS', '30'))
-BITRATE = int(os.getenv('STREAM_BITRATE', '6000000'))  # 6 Mbps for 1080p quality
+# Video configuration
+WIDTH = 1920
+HEIGHT = 1080
+FRAMERATE = 25
+BITRATE = 10000000  # 10 Mbps for 1080p
 
 class GStreamerWebRTC:
     def __init__(self):
@@ -37,16 +37,10 @@ class GStreamerWebRTC:
         self.webrtc = None
         self.session_id = None
         self.fifo_path = '/tmp/h264_fifo'
-        self.fifo_keep_fd = None
         self.rpicam_process = None
         self.rpicam_restart_count = 0
         self.fps_count = 0
         self.fps_last_time = time.monotonic()
-        self.last_buffer_time = None
-        self.max_gap_ms = 0.0
-        self.bytes_count = 0
-        self.packet_count = 0
-        self.max_packet_size = 0
         
     def create_cloudflare_session(self):
         """Create new Cloudflare session"""
@@ -80,10 +74,9 @@ class GStreamerWebRTC:
         # GStreamer pipeline reads from FIFO (rpicam-vid already running)
         pipeline_str = f"""
         filesrc location={self.fifo_path} ! 
-        h264parse config-interval=1 ! 
+        h264parse config-interval=-1 ! 
         video/x-h264,stream-format=byte-stream,alignment=au,profile=baseline ! 
-        rtph264pay config-interval=1 pt=96 mtu=1200 aggregate-mode=zero-latency ! 
-        queue max-size-time=200000000 leaky=downstream ! 
+        rtph264pay config-interval=-1 pt=96 mtu=1200 aggregate-mode=zero-latency ! 
         webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.cloudflare.com:3478
         """
         
@@ -264,21 +257,15 @@ class GStreamerWebRTC:
         
         # Monitor pipeline stats
         GLib.timeout_add_seconds(5, self.print_stats)
-        GLib.timeout_add_seconds(5, self.request_webrtc_stats)
 
     def ensure_fifo(self):
         """Ensure FIFO exists without removing it while in use"""
         if os.path.exists(self.fifo_path):
             if not stat.S_ISFIFO(os.stat(self.fifo_path).st_mode):
                 raise RuntimeError(f"{self.fifo_path} exists and is not a FIFO")
-        else:
-            os.mkfifo(self.fifo_path)
-            logger.info(f"Created FIFO at {self.fifo_path}")
-
-        # Keep a dummy reader open so rpicam-vid doesn't get SIGPIPE if no reader yet
-        if self.fifo_keep_fd is None:
-            self.fifo_keep_fd = os.open(self.fifo_path, os.O_RDONLY | os.O_NONBLOCK)
-            logger.info("Opened FIFO keep-alive reader")
+            return
+        os.mkfifo(self.fifo_path)
+        logger.info(f"Created FIFO at {self.fifo_path}")
 
     def check_rtp_caps_ready(self):
         """Wait until rtph264pay has negotiated caps with a concrete payload"""
@@ -315,45 +302,13 @@ class GStreamerWebRTC:
             logger.warning("rtph264pay src pad not found for FPS probe")
             return
 
-        src_pad.add_probe(Gst.PadProbeType.BUFFER | Gst.PadProbeType.BUFFER_LIST, self.on_pay_buffer)
+        src_pad.add_probe(Gst.PadProbeType.BUFFER, self.on_pay_buffer)
         GLib.timeout_add_seconds(1, self.report_fps)
-        GLib.timeout_add_seconds(1, self.report_gaps)
 
     def on_pay_buffer(self, pad, info):
         """Count RTP buffers to estimate FPS"""
-        now = time.monotonic()
         if info.type & Gst.PadProbeType.BUFFER:
             self.fps_count += 1
-            buf = info.get_buffer()
-            if buf:
-                size = buf.get_size()
-                self.bytes_count += size
-                self.packet_count += 1
-                if size > self.max_packet_size:
-                    self.max_packet_size = size
-            if self.last_buffer_time is not None:
-                gap_ms = (now - self.last_buffer_time) * 1000.0
-                if gap_ms > self.max_gap_ms:
-                    self.max_gap_ms = gap_ms
-            self.last_buffer_time = now
-
-        if info.type & Gst.PadProbeType.BUFFER_LIST:
-            blist = info.get_buffer_list()
-            if blist:
-                self.fps_count += blist.length()
-                for i in range(blist.length()):
-                    buf = blist.get(i)
-                    if buf:
-                        size = buf.get_size()
-                        self.bytes_count += size
-                        self.packet_count += 1
-                        if size > self.max_packet_size:
-                            self.max_packet_size = size
-                if self.last_buffer_time is not None:
-                    gap_ms = (now - self.last_buffer_time) * 1000.0
-                    if gap_ms > self.max_gap_ms:
-                        self.max_gap_ms = gap_ms
-                self.last_buffer_time = now
         return Gst.PadProbeReturn.OK
 
     def report_fps(self):
@@ -362,23 +317,9 @@ class GStreamerWebRTC:
         elapsed = now - self.fps_last_time
         if elapsed > 0:
             fps = self.fps_count / elapsed
-            bitrate_kbps = (self.bytes_count * 8) / (elapsed * 1000.0)
-            avg_size = (self.bytes_count / self.packet_count) if self.packet_count else 0
-            logger.info(
-                f"Measured RTP FPS: {fps:.1f}, bitrate: {bitrate_kbps:.0f} kbps, avg_pkt: {avg_size:.0f}B, max_pkt: {self.max_packet_size}B")
+            logger.info(f"Measured RTP FPS: {fps:.1f}")
         self.fps_count = 0
-        self.bytes_count = 0
-        self.packet_count = 0
-        self.max_packet_size = 0
         self.fps_last_time = now
-        return True
-
-    def report_gaps(self):
-        """Report max inter-buffer gap (freeze indicator)"""
-        if self.last_buffer_time is None:
-            return True
-        logger.info(f"Max RTP gap (last 1s): {self.max_gap_ms:.0f} ms")
-        self.max_gap_ms = 0.0
         return True
 
     def rtp_caps_ready(self):
@@ -420,52 +361,6 @@ class GStreamerWebRTC:
                 logger.info(f"ICE connection state: {state}")
         
         return True  # Keep calling
-
-    def request_webrtc_stats(self):
-        """Request WebRTC stats from webrtcbin"""
-        if not self.webrtc:
-            return True
-        promise = Gst.Promise.new_with_change_func(self.on_webrtc_stats, None, None)
-        self.webrtc.emit('get-stats', None, promise)
-        return True
-
-    def on_webrtc_stats(self, promise, _unused, __):
-        """Log outbound RTP stats from webrtcbin"""
-        promise.wait()
-        reply = promise.get_reply()
-        if not reply:
-            logger.info("WebRTC stats: empty reply")
-            return
-
-        stats = reply.get_value('stats')
-        if not stats:
-            logger.info("WebRTC stats: no stats in reply")
-            return
-
-        try:
-            logger.info(f"WebRTC stats raw: {stats.to_string()}")
-        except Exception:
-            logger.info("WebRTC stats raw: <unprintable>")
-
-        # stats is a GstStructure with nested stats objects
-        # Log only outbound-rtp video to avoid noise
-        for i in range(stats.n_fields()):
-            field_name = stats.nth_field_name(i)
-            value = stats.get_value(field_name)
-            if not isinstance(value, Gst.Structure):
-                continue
-            if value.get_string('type') != 'outbound-rtp':
-                continue
-            if value.get_string('kind') != 'video':
-                continue
-
-            packets_sent = value.get_value('packets-sent')
-            bytes_sent = value.get_value('bytes-sent')
-            frames_sent = value.get_value('frames-encoded') or value.get_value('frames-sent')
-            rtt = value.get_value('round-trip-time')
-
-            logger.info(
-                f"WebRTC outbound stats: packets={packets_sent}, bytes={bytes_sent}, frames={frames_sent}, rtt={rtt}")
     
     def run(self):
         """Main run loop"""
@@ -486,9 +381,6 @@ class GStreamerWebRTC:
             if hasattr(self, 'rpicam_process'):
                 self.rpicam_process.terminate()
                 self.rpicam_process.wait()
-            if self.fifo_keep_fd is not None:
-                os.close(self.fifo_keep_fd)
-                self.fifo_keep_fd = None
             if hasattr(self, 'fifo_path'):
                 import os
                 if os.path.exists(self.fifo_path):
@@ -538,12 +430,11 @@ class GStreamerWebRTC:
             '--profile', 'baseline',
             '--level', '4',
             '--bitrate', str(BITRATE),
-            '--intra', '15',        # Force keyframe every 15 frames (~0.5s at 30fps)
             '--inline',              # SPS/PPS in every keyframe
             '--flush',               # Low latency
             '--timeout', '0',        # Run indefinitely
             '--nopreview',           # No preview
-            '--denoise', 'cdn_fast', # Reduce noise for better compression quality
+            '--denoise', 'cdn_off',  # Disable denoise for lower latency
             '-o', self.fifo_path
         ], stdout=subprocess.DEVNULL, stderr=stderr_log)
         logger.info(f"Started rpicam-vid: {WIDTH}x{HEIGHT} @ {FRAMERATE}fps, {BITRATE/1000000}Mbps")

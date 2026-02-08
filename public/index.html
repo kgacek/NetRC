@@ -110,7 +110,7 @@
         
         <div class="controls">
             <input type="text" id="appId" placeholder="Cloudflare App ID" />
-            <input type="text" id="appSecret" placeholder="Cloudflare App Secret" />
+            <input type="password" id="appSecret" placeholder="Cloudflare App Secret" />
             <input type="text" id="signalingServer" placeholder="Signaling Server" value="https://79-76-127-159.nip.io" />
             <button class="refresh-btn" onclick="loadSessions()">Refresh Sessions</button>
         </div>
@@ -133,113 +133,54 @@
         <div id="status" class="status">
             Waiting to connect...
         </div>
-
-        <div id="stats" class="status" style="margin-top: 10px;">
-            Stats: n/a
+        
+        <div class="controls" style="margin-top: 20px; text-align: center; color: #888;">
+            <p><strong>Car Controls:</strong> W/S - Forward/Reverse | A/D - Left/Right | SPACE - Emergency Brake | R - Reset</p>
         </div>
     </div>
 
     <script>
         let peerConnection = null;
+        let controlConnection = null;
+        let controlChannel = null;
         let mySessionId = null;
+        let myControlSessionId = null;
         let selectedSessionId = null;
-        let statsInterval = null;
-        let lastFramesDecoded = null;
-        let lastStatsTs = null;
-        let renderStatsInterval = null;
+        
+        // Load saved credentials on page load
+        window.addEventListener('DOMContentLoaded', () => {
+            const savedAppId = localStorage.getItem('cf_app_id');
+            const savedAppSecret = localStorage.getItem('cf_app_secret');
+            const savedSignalingServer = localStorage.getItem('signaling_server');
+            
+            if (savedAppId) document.getElementById('appId').value = savedAppId;
+            if (savedAppSecret) document.getElementById('appSecret').value = savedAppSecret;
+            if (savedSignalingServer) document.getElementById('signalingServer').value = savedSignalingServer;
+        });
+        
+        // Car control state
+        let throttle = 0;
+        let steer = 0;
+        let keys = {
+            'w': false,
+            's': false,
+            'a': false,
+            'd': false
+        };
+        
+        // Control parameters
+        const THROTTLE_ACCEL = 5;
+        const THROTTLE_DECEL = 20;
+        const STEER_SPEED = 70;
+        const STEER_RETURN_SPEED = 80;
+        const MAX_THROTTLE = 125;
+        const MAX_STEER = 1000;
 
         function updateStatus(message, type = 'info') {
             const statusEl = document.getElementById('status');
             statusEl.textContent = message;
             statusEl.className = 'status ' + type;
             console.log(message);
-        }
-
-        function updateStats(text) {
-            const statsEl = document.getElementById('stats');
-            statsEl.textContent = text;
-        }
-
-        function startStats() {
-            if (statsInterval) clearInterval(statsInterval);
-            lastFramesDecoded = null;
-            lastStatsTs = null;
-
-            statsInterval = setInterval(async () => {
-                if (!peerConnection) return;
-                const receiver = peerConnection.getReceivers().find(r => r.track && r.track.kind === 'video');
-                if (!receiver) return;
-
-                const stats = await receiver.getStats();
-                let inbound = null;
-                let track = null;
-
-                stats.forEach(report => {
-                    if (report.type === 'inbound-rtp' && report.kind === 'video') {
-                        inbound = report;
-                    } else if (report.type === 'track' && report.kind === 'video') {
-                        track = report;
-                    }
-                });
-
-                if (!inbound && !track) return;
-
-                const now = performance.now();
-                const framesDecoded = (inbound && inbound.framesDecoded != null)
-                    ? inbound.framesDecoded
-                    : (track && track.framesDecoded != null ? track.framesDecoded : null);
-
-                let fps = 'n/a';
-                if (framesDecoded != null && lastFramesDecoded != null && lastStatsTs != null) {
-                    const deltaFrames = framesDecoded - lastFramesDecoded;
-                    const deltaSec = (now - lastStatsTs) / 1000;
-                    fps = (deltaFrames / deltaSec).toFixed(1);
-                }
-
-                lastFramesDecoded = framesDecoded;
-                lastStatsTs = now;
-
-                const jitter = inbound && inbound.jitter != null ? inbound.jitter.toFixed(3) : 'n/a';
-                const packetsLost = inbound && inbound.packetsLost != null ? inbound.packetsLost : 'n/a';
-                const packetsReceived = inbound && inbound.packetsReceived != null ? inbound.packetsReceived : 'n/a';
-                const framesDropped = inbound && inbound.framesDropped != null ? inbound.framesDropped : 'n/a';
-
-                let jitterBufferMs = 'n/a';
-                if (inbound && inbound.jitterBufferDelay != null && inbound.jitterBufferEmittedCount) {
-                    jitterBufferMs = ((inbound.jitterBufferDelay / inbound.jitterBufferEmittedCount) * 1000).toFixed(1);
-                }
-
-                updateStats(`Stats: fps=${fps}, jitter=${jitter}s, jb=${jitterBufferMs}ms, lost=${packetsLost}, recv=${packetsReceived}, dropped=${framesDropped}`);
-            }, 1000);
-        }
-
-        function startRenderStats() {
-            const video = document.getElementById('remoteVideo');
-            if (renderStatsInterval) clearInterval(renderStatsInterval);
-
-            renderStatsInterval = setInterval(() => {
-                if (!video) return;
-                if (typeof video.getVideoPlaybackQuality === 'function') {
-                    const q = video.getVideoPlaybackQuality();
-                    updateStats(`Stats: fps=${document.getElementById('stats').textContent.split('fps=')[1]?.split(',')[0] || 'n/a'}, ` +
-                                `jitter=${document.getElementById('stats').textContent.split('jitter=')[1]?.split(',')[0] || 'n/a'}, ` +
-                                `jb=${document.getElementById('stats').textContent.split('jb=')[1]?.split(',')[0] || 'n/a'}, ` +
-                                `lost=${document.getElementById('stats').textContent.split('lost=')[1]?.split(',')[0] || 'n/a'}, ` +
-                                `recv=${document.getElementById('stats').textContent.split('recv=')[1]?.split(',')[0] || 'n/a'}, ` +
-                                `dropped=${document.getElementById('stats').textContent.split('dropped=')[1] || 'n/a'}, ` +
-                                `renderDropped=${q.droppedVideoFrames}, total=${q.totalVideoFrames}`);
-                }
-            }, 1000);
-
-            video.onwaiting = () => {
-                updateStatus('Buffering (video waiting)...', 'error');
-            };
-            video.onplaying = () => {
-                updateStatus('Playing', 'success');
-            };
-            video.onstalled = () => {
-                updateStatus('Video stalled', 'error');
-            };
         }
 
         async function loadSessions() {
@@ -308,10 +249,23 @@
             const appId = document.getElementById('appId').value.trim();
             const appSecret = document.getElementById('appSecret').value.trim();
             const rpiSessionId = document.getElementById('sessionId').value.trim();
+            const signalingServer = document.getElementById('signalingServer').value.trim();
 
             if (!appId || !appSecret || !rpiSessionId) {
                 updateStatus('Please fill in all fields', 'error');
                 return;
+            }
+            
+            // Save credentials to localStorage
+            localStorage.setItem('cf_app_id', appId);
+            localStorage.setItem('cf_app_secret', appSecret);
+            localStorage.setItem('signaling_server', signalingServer);
+            
+            // IMPORTANT: Disconnect old connections first
+            if (peerConnection || controlConnection) {
+                console.log('Cleaning up old connections...');
+                disconnect();
+                await new Promise(resolve => setTimeout(resolve, 500)); // Wait for cleanup
             }
 
             try {
@@ -352,8 +306,6 @@
                         video.srcObject = event.streams[0];
                         video.play().catch(e => console.error('Play error:', e));
                     }
-                    startStats();
-                    startRenderStats();
                 };
 
                 peerConnection.onconnectionstatechange = () => {
@@ -370,15 +322,7 @@
                 };
 
                 // Add transceiver to receive video
-                const videoTransceiver = peerConnection.addTransceiver('video', { direction: 'recvonly' });
-                if (videoTransceiver && videoTransceiver.receiver) {
-                    // Add a small playout delay to smooth jitter (if supported by browser)
-                    try {
-                        videoTransceiver.receiver.playoutDelayHint = 0.2;
-                    } catch (e) {
-                        console.warn('playoutDelayHint not supported', e);
-                    }
-                }
+                peerConnection.addTransceiver('video', { direction: 'recvonly' });
 
                 // Create offer
                 const offer = await peerConnection.createOffer();
@@ -444,7 +388,10 @@
                         type: pullData.sessionDescription.type,
                         sdp: pullData.sessionDescription.sdp
                     });
-                    updateStatus('Waiting for video stream...', 'success');
+                    updateStatus('Video connected! Setting up control...', 'success');
+                    
+                    // Now setup control connection
+                    await setupControlConnection(appId, appSecret);
                 } else {
                     throw new Error('No session description in response');
                 }
@@ -461,20 +408,22 @@
         }
 
         function disconnect() {
+            stopControlLoop();
+            
+            if (controlChannel) {
+                controlChannel.close();
+                controlChannel = null;
+            }
+            
+            if (controlConnection) {
+                controlConnection.close();
+                controlConnection = null;
+            }
+            
             if (peerConnection) {
                 peerConnection.close();
                 peerConnection = null;
             }
-
-            if (statsInterval) {
-                clearInterval(statsInterval);
-                statsInterval = null;
-            }
-            if (renderStatsInterval) {
-                clearInterval(renderStatsInterval);
-                renderStatsInterval = null;
-            }
-            updateStats('Stats: n/a');
             
             const video = document.getElementById('remoteVideo');
             video.srcObject = null;
@@ -482,6 +431,255 @@
             document.getElementById('connectBtn').disabled = false;
             document.getElementById('disconnectBtn').disabled = true;
             updateStatus('Disconnected');
+        }
+        
+        // Car control functions
+        async function setupControlConnection(appId, appSecret) {
+            try {
+                updateStatus('Creating control session...', 'success');
+                
+                // Create OUR session for sending control
+                const createResponse = await fetch(`https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/new`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${appSecret}`,
+                        'Content-Type': 'application/json'
+                    }
+                });
+                
+                if (!createResponse.ok) {
+                    throw new Error(`Failed to create control session: ${createResponse.status}`);
+                }
+                
+                const sessionData = await createResponse.json();
+                myControlSessionId = sessionData.sessionId;
+                console.log('Created control session:', myControlSessionId);
+                
+                // Create peer connection for control
+                controlConnection = new RTCPeerConnection({
+                    iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }],
+                    bundlePolicy: 'max-bundle'
+                });
+                
+                // Create temporary DataChannel to include in offer (like Cloudflare example)
+                const tempDc = controlConnection.createDataChannel('server-events', { negotiated: false });
+                tempDc.onmessage = (m) => console.log('Server event:', m);
+                
+                // Create offer for transport
+                const offer = await controlConnection.createOffer();
+                await controlConnection.setLocalDescription(offer);
+                
+                console.log('Control offer SDP:', offer.sdp);
+                
+                // First establish DataChannel transport (like Cloudflare example)
+                console.log('Establishing DataChannel transport...');
+                const establishResponse = await fetch(
+                    `https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${myControlSessionId}/datachannels/establish`,
+                    {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': `Bearer ${appSecret}`,
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            dataChannel: {
+                                location: 'remote',
+                                dataChannelName: 'server-events'
+                            },
+                            sessionDescription: {
+                                type: 'offer',
+                                sdp: offer.sdp
+                            }
+                        })
+                    }
+                );
+                
+                const establishData = await establishResponse.json();
+                
+                if (!establishResponse.ok) {
+                    throw new Error(`Failed to establish transport: ${JSON.stringify(establishData)}`);
+                }
+                console.log('Transport established');
+                
+                if (establishData.requiresImmediateRenegotiation) {
+                    await controlConnection.setRemoteDescription(establishData.sessionDescription);
+                    const answer = await controlConnection.createAnswer();
+                    await controlConnection.setLocalDescription(answer);
+                    
+                    await fetch(
+                        `https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${myControlSessionId}/renegotiate`,
+                        {
+                            method: 'PUT',
+                            headers: {
+                                'Authorization': `Bearer ${appSecret}`,
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({
+                                sessionDescription: {
+                                    type: 'answer',
+                                    sdp: controlConnection.localDescription.sdp
+                                }
+                            })
+                        }
+                    );
+                } else if (establishData.sessionDescription) {
+                    await controlConnection.setRemoteDescription(establishData.sessionDescription);
+                }
+                
+                const dcNewResponse = await fetch(
+                    `https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${myControlSessionId}/datachannels/new`,
+                    {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': `Bearer ${appSecret}`,
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            dataChannels: [{
+                                location: 'local',
+                                dataChannelName: 'control'
+                            }]
+                        })
+                    }
+                );
+                
+                const dcNewData = await dcNewResponse.json();
+                
+                if (!dcNewResponse.ok) {
+                    throw new Error(`Failed to create DataChannel: ${JSON.stringify(dcNewData)}`);
+                }
+                
+                const controlChannelId = dcNewData.dataChannels[0].id;
+                
+                // Register control session with signaling server BEFORE creating negotiated DataChannel
+                // This allows RPi to start subscribing
+                const signalingServer = document.getElementById('signalingServer').value;
+                if (signalingServer) {
+                    try {
+                        await fetch(`${signalingServer}/api/control`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                videoSessionId: selectedSessionId,
+                                controlSessionId: myControlSessionId
+                            })
+                        });
+                        console.log('Control session registered, waiting for RPi...');
+                        await new Promise(resolve => setTimeout(resolve, 3000));
+                        
+                    } catch (e) {
+                        console.warn('Could not register control session:', e);
+                    }
+                }
+                
+                controlChannel = controlConnection.createDataChannel('control', {
+                    negotiated: true,
+                    id: controlChannelId
+                });
+                
+                controlChannel.onopen = () => {
+                    console.log('Control ready');
+                    updateStatus('Control ready! Use WASD to drive.', 'success');
+                    startControlLoop();
+                };
+                
+                controlChannel.onclose = () => {
+                    console.log('Control DataChannel closed');
+                    stopControlLoop();
+                };
+                
+                controlChannel.onerror = (error) => {
+                    console.error('DataChannel error:', error);
+                };
+                
+            } catch (error) {
+                console.error('Control setup error:', error);
+                updateStatus(`Control setup failed: ${error.message}`, 'error');
+            }
+        }
+        
+        function updateCarControl() {
+            // === THROTTLE ===
+            if (keys['w'] && !keys['s']) {
+                throttle = Math.max(throttle - THROTTLE_ACCEL - 100, -MAX_THROTTLE);
+            } else if (keys['s'] && !keys['w']) {
+                throttle = Math.min(100 + throttle + THROTTLE_ACCEL, MAX_THROTTLE);
+            } else {
+                if (throttle > 0) {
+                    throttle = Math.max(0, throttle - THROTTLE_DECEL);
+                } else if (throttle < 0) {
+                    throttle = Math.min(0, throttle + THROTTLE_DECEL);
+                }
+            }
+            
+            // === STEERING ===
+            if (keys['a'] && !keys['d']) {
+                steer = Math.min(steer + STEER_SPEED, MAX_STEER);
+            } else if (keys['d'] && !keys['a']) {
+                steer = Math.max(steer - STEER_SPEED, -MAX_STEER);
+            } else {
+                if (steer > 0) {
+                    steer = Math.max(0, steer - STEER_RETURN_SPEED);
+                } else if (steer < 0) {
+                    steer = Math.min(0, steer + STEER_RETURN_SPEED);
+                }
+            }
+            
+            if (controlChannel && controlChannel.readyState === 'open') {
+                const command = JSON.stringify({
+                    throttle: Math.round(throttle),
+                    steer: Math.round(steer)
+                });
+                controlChannel.send(command);
+            }
+        }
+        
+        function handleKeyDown(e) {
+            const key = e.key.toLowerCase();
+            if (key === 'w') keys['w'] = true;
+            else if (key === 's') keys['s'] = true;
+            else if (key === 'a') keys['a'] = true;
+            else if (key === 'd') keys['d'] = true;
+            else if (key === ' ') {
+                e.preventDefault();
+                throttle = 0;
+                steer = 0;
+                keys = { 'w': false, 's': false, 'a': false, 'd': false };
+            } else if (key === 'r') {
+                throttle = 0;
+                steer = 0;
+                keys = { 'w': false, 's': false, 'a': false, 'd': false };
+            }
+        }
+        
+        function handleKeyUp(e) {
+            const key = e.key.toLowerCase();
+            if (key === 'w') keys['w'] = false;
+            else if (key === 's') keys['s'] = false;
+            else if (key === 'a') keys['a'] = false;
+            else if (key === 'd') keys['d'] = false;
+        }
+        
+        let controlLoopInterval = null;
+        function startControlLoop() {
+            if (controlLoopInterval) return;
+            controlLoopInterval = setInterval(() => {
+                updateCarControl();
+            }, 20); // 50Hz
+            window.addEventListener('keydown', handleKeyDown);
+            window.addEventListener('keyup', handleKeyUp);
+        }
+        
+        function stopControlLoop() {
+            if (controlLoopInterval) {
+                clearInterval(controlLoopInterval);
+                controlLoopInterval = null;
+            }
+            window.removeEventListener('keydown', handleKeyDown);
+            window.removeEventListener('keyup', handleKeyUp);
+            throttle = 0;
+            steer = 0;
+            keys = { 'w': false, 's': false, 'a': false, 'd': false };
         }
 
         window.addEventListener('beforeunload', disconnect);
