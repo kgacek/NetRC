@@ -34,7 +34,6 @@ class GStreamerWebRTC:
         self.pipe = None
         self.webrtc = None
         self.session_id = None
-        self.fifo_path = '/tmp/h264_fifo'
         
     def create_cloudflare_session(self):
         """Create new Cloudflare session"""
@@ -92,14 +91,15 @@ class GStreamerWebRTC:
         self.transceiver = self.webrtc.emit('add-transceiver', GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY, caps)
         logger.info(f"Added video transceiver: {self.transceiver}")
         
+        # Monitor transceiver for when sender is ready
+        if self.transceiver:
+            self.transceiver.connect('notify::sender', self.on_transceiver_sender_ready)
+        
         # Flag to track if negotiation has been triggered
         self.negotiation_done = False
         
         # Track ICE gathering state
         self.pending_offer_sdp = None
-        
-        # Track caps check attempts
-        self.caps_check_count = 0
         
     def on_negotiation_needed(self, element):
         """Handle negotiation needed"""
@@ -137,61 +137,6 @@ class GStreamerWebRTC:
             self.negotiation_done = True
             logger.info("RTP pad connected, triggering negotiation in 1 second...")
             GLib.timeout_add(1000, self.trigger_negotiation)
-    
-    def check_caps_negotiated(self):
-        """Check if caps have been negotiated by examining transceiver sender"""
-        if self.negotiation_done:
-            return False  # Stop checking
-            
-        self.caps_check_count += 1
-        
-        if not self.transceiver:
-            logger.warning("No transceiver found")
-            if self.caps_check_count > 30:  # 30 seconds max wait
-                logger.error("Timeout waiting for transceiver")
-                return False
-            return True  # Continue checking
-        
-        # Get sender from transceiver
-        sender = self.transceiver.get_property('sender')
-        if not sender:
-            logger.debug(f"Waiting for sender... ({self.caps_check_count}s)")
-            if self.caps_check_count > 30:
-                logger.error("Timeout waiting for sender")
-                return False
-            return True
-        
-        # Check if sender has transport with specific payload (not range)
-        # This indicates caps have been negotiated
-        try:
-            # Try to get the current caps from the sender's transport
-            # When caps are negotiated, payload will be specific (96) not range [96,127]
-            transport = sender.get_property('transport')
-            if transport:
-                # Caps are negotiated - trigger negotiation
-                logger.info(f"Caps negotiated after {self.caps_check_count} seconds, triggering negotiation...")
-                self.negotiation_done = True
-                GLib.timeout_add(500, self.trigger_negotiation)
-                return False  # Stop checking
-        except Exception as e:
-            logger.debug(f"Checking caps negotiation: {e}")
-        
-        # Alternative: check if we can create offer and it has m= line
-        # by checking transceiver's current_direction
-        direction = self.transceiver.get_property('current-direction')
-        if direction and direction != GstWebRTC.WebRTCRTPTransceiverDirection.NONE:
-            logger.info(f"Transceiver active (direction: {direction}) after {self.caps_check_count} seconds, triggering negotiation...")
-            self.negotiation_done = True
-            GLib.timeout_add(500, self.trigger_negotiation)
-            return False
-        
-        logger.debug(f"Still waiting for caps negotiation... ({self.caps_check_count}s)")
-        
-        if self.caps_check_count > 30:
-            logger.error("Timeout waiting for caps negotiation (30s)")
-            return False
-            
-        return True  # Continue checking
     
     def on_transceiver_sender_ready(self, transceiver, pspec):
         """Called when transceiver sender is ready"""
@@ -282,21 +227,20 @@ class GStreamerWebRTC:
         
         logger.info("Remote description set, streaming started!")
     
-    def start_pipeline(self, state=Gst.State.PLAYING):
+    def start_pipeline(self):
         """Start the GStreamer pipeline"""
-        logger.info(f"Setting pipeline to {state}...")
-        ret = self.pipe.set_state(state)
+        logger.info("Starting pipeline...")
+        ret = self.pipe.set_state(Gst.State.PLAYING)
         if ret == Gst.StateChangeReturn.FAILURE:
-            logger.error("Failed to change pipeline state")
+            logger.error("Failed to start pipeline")
             sys.exit(1)
         elif ret == Gst.StateChangeReturn.ASYNC:
             logger.info("Pipeline state change is ASYNC, waiting...")
         
         logger.info(f"Pipeline set_state returned: {ret}")
         
-        # Monitor pipeline stats (only start if going to PLAYING)
-        if state == Gst.State.PLAYING:
-            GLib.timeout_add_seconds(5, self.print_stats)
+        # Monitor pipeline stats
+        GLib.timeout_add_seconds(5, self.print_stats)
     
     def trigger_negotiation(self):
         """Trigger WebRTC negotiation"""
@@ -353,8 +297,12 @@ class GStreamerWebRTC:
             # Create Cloudflare session
             self.create_cloudflare_session()
             
-            # Create and start pipeline (will start rpicam internally)
-            self.create_and_start_pipeline()
+            # Start rpicam-vid process (returns immediately)
+            self.start_rpicam()
+            
+            # Schedule pipeline creation after rpicam-vid initializes
+            logger.info("Scheduling pipeline creation in 3 seconds...")
+            GLib.timeout_add(6000, self.create_and_start_pipeline)
             
         except Exception as e:
             logger.error(f"Initialization failed: {e}")
@@ -363,8 +311,14 @@ class GStreamerWebRTC:
         return False  # Don't repeat idle callback
     
     def start_rpicam(self):
-        """Start rpicam-vid process (FIFO already created)"""
+        """Start rpicam-vid process"""
         import subprocess
+        
+        # Create FIFO if it doesn't exist
+        fifo_path = '/tmp/h264_fifo'
+        if os.path.exists(fifo_path):
+            os.remove(fifo_path)
+        os.mkfifo(fifo_path)
         
         # Start rpicam-vid with hardware encoding in background
         self.rpicam_process = subprocess.Popen([
@@ -381,46 +335,30 @@ class GStreamerWebRTC:
             '--timeout', '0',        # Run indefinitely
             '--nopreview',           # No preview
             '--denoise', 'cdn_off',  # Disable denoise for lower latency
-            '-o', self.fifo_path
+            '-o', fifo_path
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         
+        self.fifo_path = fifo_path
         logger.info(f"Started rpicam-vid: {WIDTH}x{HEIGHT} @ {FRAMERATE}fps, {BITRATE/1000000}Mbps")
     
     def create_and_start_pipeline(self):
-        """Create and start GStreamer pipeline"""
-        try:            # Create FIFO first (before creating pipeline with filesrc)
-            if os.path.exists(self.fifo_path):
-                os.remove(self.fifo_path)
-            os.mkfifo(self.fifo_path)
-            logger.info(f"Created FIFO at {self.fifo_path}")
-                        # Create pipeline first (before rpicam starts writing)
+        """Create and start GStreamer pipeline (called after rpicam-vid delay)"""
+        try:
+            # Create pipeline
             self.create_pipeline()
             
-            # Set pipeline to PAUSED (filesrc ready to read but not yet blocking)
-            self.start_pipeline(Gst.State.PAUSED)
-            logger.info("Pipeline in PAUSED state, ready to receive data")
+            # Start pipeline
+            self.start_pipeline()
             
-            # Now start rpicam-vid to write to FIFO
-            self.start_rpicam()
+            logger.info("Pipeline started successfully!")
             
-            # Wait 2 seconds for rpicam to start, then set to PLAYING
-            GLib.timeout_add(2000, self.start_playing)
+            # Wait longer for rpicam-vid to start streaming before negotiation
+            logger.info("Waiting for camera stream to stabilize (20 seconds)...")
+            GLib.timeout_add(20000, self.trigger_negotiation)
             
         except Exception as e:
             logger.error(f"Pipeline creation failed: {e}")
             self.main_loop.quit()
-        
-        return False  # Don't repeat
-    
-    def start_playing(self):
-        """Transition pipeline to PLAYING state and start caps checking"""
-        logger.info("Starting pipeline playback...")
-        self.start_pipeline(Gst.State.PLAYING)
-        logger.info("Pipeline started successfully!")
-        
-        # Start checking for caps negotiation every second
-        logger.info("Waiting for caps to be negotiated...")
-        GLib.timeout_add(1000, self.check_caps_negotiated)
         
         return False  # Don't repeat
 
