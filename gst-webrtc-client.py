@@ -108,6 +108,7 @@ class GStreamerWebRTC:
         import requests
         
         logger.info("Sending offer to Cloudflare...")
+        logger.info(f"SDP:\n{offer_sdp}")
         
         # Extract video mid
         video_mid = None
@@ -119,11 +120,13 @@ class GStreamerWebRTC:
                 for i in range(m_idx, len(lines)):
                     if lines[i].startswith('a=mid:'):
                         video_mid = lines[i].split(':')[1]
+                        logger.info(f"Found video mid: {video_mid}")
                         break
                 break
         
         if not video_mid:
             logger.error("Could not find video mid in SDP")
+            logger.error(f"SDP lines around m=video: {[l for l in offer_sdp.split(chr(10)) if 'video' in l or 'mid' in l]}")
             return
         
         url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/{self.session_id}/tracks/new"
