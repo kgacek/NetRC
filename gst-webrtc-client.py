@@ -91,15 +91,14 @@ class GStreamerWebRTC:
         self.transceiver = self.webrtc.emit('add-transceiver', GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY, caps)
         logger.info(f"Added video transceiver: {self.transceiver}")
         
-        # Monitor transceiver for when sender is ready
-        if self.transceiver:
-            self.transceiver.connect('notify::sender', self.on_transceiver_sender_ready)
-        
         # Flag to track if negotiation has been triggered
         self.negotiation_done = False
         
         # Track ICE gathering state
         self.pending_offer_sdp = None
+        
+        # Track caps check attempts
+        self.caps_check_count = 0
         
     def on_negotiation_needed(self, element):
         """Handle negotiation needed"""
@@ -137,6 +136,61 @@ class GStreamerWebRTC:
             self.negotiation_done = True
             logger.info("RTP pad connected, triggering negotiation in 1 second...")
             GLib.timeout_add(1000, self.trigger_negotiation)
+    
+    def check_caps_negotiated(self):
+        """Check if caps have been negotiated by examining transceiver sender"""
+        if self.negotiation_done:
+            return False  # Stop checking
+            
+        self.caps_check_count += 1
+        
+        if not self.transceiver:
+            logger.warning("No transceiver found")
+            if self.caps_check_count > 30:  # 30 seconds max wait
+                logger.error("Timeout waiting for transceiver")
+                return False
+            return True  # Continue checking
+        
+        # Get sender from transceiver
+        sender = self.transceiver.get_property('sender')
+        if not sender:
+            logger.debug(f"Waiting for sender... ({self.caps_check_count}s)")
+            if self.caps_check_count > 30:
+                logger.error("Timeout waiting for sender")
+                return False
+            return True
+        
+        # Check if sender has transport with specific payload (not range)
+        # This indicates caps have been negotiated
+        try:
+            # Try to get the current caps from the sender's transport
+            # When caps are negotiated, payload will be specific (96) not range [96,127]
+            transport = sender.get_property('transport')
+            if transport:
+                # Caps are negotiated - trigger negotiation
+                logger.info(f"Caps negotiated after {self.caps_check_count} seconds, triggering negotiation...")
+                self.negotiation_done = True
+                GLib.timeout_add(500, self.trigger_negotiation)
+                return False  # Stop checking
+        except Exception as e:
+            logger.debug(f"Checking caps negotiation: {e}")
+        
+        # Alternative: check if we can create offer and it has m= line
+        # by checking transceiver's current_direction
+        direction = self.transceiver.get_property('current-direction')
+        if direction and direction != GstWebRTC.WebRTCRTPTransceiverDirection.NONE:
+            logger.info(f"Transceiver active (direction: {direction}) after {self.caps_check_count} seconds, triggering negotiation...")
+            self.negotiation_done = True
+            GLib.timeout_add(500, self.trigger_negotiation)
+            return False
+        
+        logger.debug(f"Still waiting for caps negotiation... ({self.caps_check_count}s)")
+        
+        if self.caps_check_count > 30:
+            logger.error("Timeout waiting for caps negotiation (30s)")
+            return False
+            
+        return True  # Continue checking
     
     def on_transceiver_sender_ready(self, transceiver, pspec):
         """Called when transceiver sender is ready"""
@@ -352,9 +406,9 @@ class GStreamerWebRTC:
             
             logger.info("Pipeline started successfully!")
             
-            # Wait longer for rpicam-vid to start streaming before negotiation
-            logger.info("Waiting for camera stream to stabilize (10 seconds)...")
-            GLib.timeout_add(10000, self.trigger_negotiation)
+            # Start checking for caps negotiation every second
+            logger.info("Waiting for caps to be negotiated...")
+            GLib.timeout_add(1000, self.check_caps_negotiated)
             
         except Exception as e:
             logger.error(f"Pipeline creation failed: {e}")
