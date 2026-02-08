@@ -34,6 +34,7 @@ class GStreamerWebRTC:
         self.pipe = None
         self.webrtc = None
         self.session_id = None
+        self.fifo_path = '/tmp/h264_fifo'
         
     def create_cloudflare_session(self):
         """Create new Cloudflare session"""
@@ -366,10 +367,9 @@ class GStreamerWebRTC:
         import subprocess
         
         # Create FIFO if it doesn't exist
-        fifo_path = '/tmp/h264_fifo'
-        if os.path.exists(fifo_path):
-            os.remove(fifo_path)
-        os.mkfifo(fifo_path)
+        if os.path.exists(self.fifo_path):
+            os.remove(self.fifo_path)
+        os.mkfifo(self.fifo_path)
         
         # Start rpicam-vid with hardware encoding in background
         self.rpicam_process = subprocess.Popen([
@@ -386,10 +386,9 @@ class GStreamerWebRTC:
             '--timeout', '0',        # Run indefinitely
             '--nopreview',           # No preview
             '--denoise', 'cdn_off',  # Disable denoise for lower latency
-            '-o', fifo_path
+            '-o', self.fifo_path
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         
-        self.fifo_path = fifo_path
         logger.info(f"Started rpicam-vid: {WIDTH}x{HEIGHT} @ {FRAMERATE}fps, {BITRATE/1000000}Mbps")
     
     def create_and_start_pipeline(self):
