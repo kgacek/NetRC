@@ -105,10 +105,25 @@ class GStreamerWebRTC:
         
         # With Cloudflare ice-lite, send offer immediately without waiting for ICE gathering
         # Server will provide ICE candidates in the answer
-        logger.info("Sending offer to Cloudflare (ice-lite mode)...")
         sdp = offer.sdp.as_text()
+        
+        # Validate SDP has media section before sending
+        if 'm=video' not in sdp or 'a=ice-ufrag' not in sdp:
+            logger.warning("SDP incomplete (no media or ICE), waiting 1s and retrying...")
+            GLib.timeout_add(1000, self.retry_negotiation)
+            return
+        
+        logger.info("Sending offer to Cloudflare (ice-lite mode)...")
         import threading
         threading.Thread(target=self.send_offer_to_cloudflare, args=(sdp,), daemon=True).start()
+    
+    def retry_negotiation(self):
+        """Retry negotiation after pipeline has data"""
+        logger.info("Retrying negotiation...")
+        if self.webrtc:
+            self.webrtc.emit('create-offer', None, 
+                Gst.Promise.new_with_change_func(self.on_offer_created, self.webrtc, None))
+        return False
     
     def on_ice_candidate(self, element, mlineindex, candidate):
         """Handle ICE candidate - not needed with ice-lite server"""
@@ -315,9 +330,9 @@ class GStreamerWebRTC:
             
             logger.info("Pipeline started successfully!")
             
-            # Schedule negotiation after pipeline is ready
-            logger.info("Scheduling negotiation in 2 seconds...")
-            GLib.timeout_add(2000, self.trigger_negotiation)
+            # Schedule negotiation after pipeline has received data
+            logger.info("Scheduling negotiation in 5 seconds...")
+            GLib.timeout_add(5000, self.trigger_negotiation)
             
         except Exception as e:
             logger.error(f"Pipeline creation failed: {e}")
