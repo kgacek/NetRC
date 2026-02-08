@@ -13,6 +13,7 @@ import os
 import sys
 import logging
 import stat
+import time
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -38,6 +39,8 @@ class GStreamerWebRTC:
         self.fifo_path = '/tmp/h264_fifo'
         self.rpicam_process = None
         self.rpicam_restart_count = 0
+        self.fps_count = 0
+        self.fps_last_time = time.monotonic()
         
     def create_cloudflare_session(self):
         """Create new Cloudflare session"""
@@ -105,6 +108,9 @@ class GStreamerWebRTC:
         
         # Track ICE gathering state
         self.pending_offer_sdp = None
+
+        # Start FPS measurement on RTP payloader
+        self.setup_fps_probe()
         
     def on_negotiation_needed(self, element):
         """Handle negotiation needed"""
@@ -282,6 +288,38 @@ class GStreamerWebRTC:
         if self.rtp_caps_check_count % 5 == 0:
             logger.info("Waiting for RTP caps negotiation...")
 
+        return True
+
+    def setup_fps_probe(self):
+        """Attach a buffer probe to measure real FPS"""
+        pay = self.pipe.get_by_name('rtph264pay0')
+        if not pay:
+            logger.warning("rtph264pay element not found for FPS probe")
+            return
+
+        src_pad = pay.get_static_pad('src')
+        if not src_pad:
+            logger.warning("rtph264pay src pad not found for FPS probe")
+            return
+
+        src_pad.add_probe(Gst.PadProbeType.BUFFER, self.on_pay_buffer)
+        GLib.timeout_add_seconds(1, self.report_fps)
+
+    def on_pay_buffer(self, pad, info):
+        """Count RTP buffers to estimate FPS"""
+        if info.type & Gst.PadProbeType.BUFFER:
+            self.fps_count += 1
+        return Gst.PadProbeReturn.OK
+
+    def report_fps(self):
+        """Report measured FPS once per second"""
+        now = time.monotonic()
+        elapsed = now - self.fps_last_time
+        if elapsed > 0:
+            fps = self.fps_count / elapsed
+            logger.info(f"Measured RTP FPS: {fps:.1f}")
+        self.fps_count = 0
+        self.fps_last_time = now
         return True
 
     def rtp_caps_ready(self):
