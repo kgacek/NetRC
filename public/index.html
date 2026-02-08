@@ -133,18 +133,83 @@
         <div id="status" class="status">
             Waiting to connect...
         </div>
+
+        <div id="stats" class="status" style="margin-top: 10px;">
+            Stats: n/a
+        </div>
     </div>
 
     <script>
         let peerConnection = null;
         let mySessionId = null;
         let selectedSessionId = null;
+        let statsInterval = null;
+        let lastFramesDecoded = null;
+        let lastStatsTs = null;
 
         function updateStatus(message, type = 'info') {
             const statusEl = document.getElementById('status');
             statusEl.textContent = message;
             statusEl.className = 'status ' + type;
             console.log(message);
+        }
+
+        function updateStats(text) {
+            const statsEl = document.getElementById('stats');
+            statsEl.textContent = text;
+        }
+
+        function startStats() {
+            if (statsInterval) clearInterval(statsInterval);
+            lastFramesDecoded = null;
+            lastStatsTs = null;
+
+            statsInterval = setInterval(async () => {
+                if (!peerConnection) return;
+                const receiver = peerConnection.getReceivers().find(r => r.track && r.track.kind === 'video');
+                if (!receiver) return;
+
+                const stats = await receiver.getStats();
+                let inbound = null;
+                let track = null;
+
+                stats.forEach(report => {
+                    if (report.type === 'inbound-rtp' && report.kind === 'video') {
+                        inbound = report;
+                    } else if (report.type === 'track' && report.kind === 'video') {
+                        track = report;
+                    }
+                });
+
+                if (!inbound && !track) return;
+
+                const now = performance.now();
+                const framesDecoded = (inbound && inbound.framesDecoded != null)
+                    ? inbound.framesDecoded
+                    : (track && track.framesDecoded != null ? track.framesDecoded : null);
+
+                let fps = 'n/a';
+                if (framesDecoded != null && lastFramesDecoded != null && lastStatsTs != null) {
+                    const deltaFrames = framesDecoded - lastFramesDecoded;
+                    const deltaSec = (now - lastStatsTs) / 1000;
+                    fps = (deltaFrames / deltaSec).toFixed(1);
+                }
+
+                lastFramesDecoded = framesDecoded;
+                lastStatsTs = now;
+
+                const jitter = inbound && inbound.jitter != null ? inbound.jitter.toFixed(3) : 'n/a';
+                const packetsLost = inbound && inbound.packetsLost != null ? inbound.packetsLost : 'n/a';
+                const packetsReceived = inbound && inbound.packetsReceived != null ? inbound.packetsReceived : 'n/a';
+                const framesDropped = inbound && inbound.framesDropped != null ? inbound.framesDropped : 'n/a';
+
+                let jitterBufferMs = 'n/a';
+                if (inbound && inbound.jitterBufferDelay != null && inbound.jitterBufferEmittedCount) {
+                    jitterBufferMs = ((inbound.jitterBufferDelay / inbound.jitterBufferEmittedCount) * 1000).toFixed(1);
+                }
+
+                updateStats(`Stats: fps=${fps}, jitter=${jitter}s, jb=${jitterBufferMs}ms, lost=${packetsLost}, recv=${packetsReceived}, dropped=${framesDropped}`);
+            }, 1000);
         }
 
         async function loadSessions() {
@@ -257,6 +322,7 @@
                         video.srcObject = event.streams[0];
                         video.play().catch(e => console.error('Play error:', e));
                     }
+                    startStats();
                 };
 
                 peerConnection.onconnectionstatechange = () => {
@@ -360,6 +426,12 @@
                 peerConnection.close();
                 peerConnection = null;
             }
+
+            if (statsInterval) {
+                clearInterval(statsInterval);
+                statsInterval = null;
+            }
+            updateStats('Stats: n/a');
             
             const video = document.getElementById('remoteVideo');
             video.srcObject = null;
