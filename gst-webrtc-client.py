@@ -27,8 +27,8 @@ SIGNALING_SERVER = os.getenv('SIGNALING_SERVER', 'https://79-76-127-159.nip.io')
 # Video configuration
 WIDTH = 1920
 HEIGHT = 1080
-FRAMERATE = 15
-BITRATE = 1000000  # 1 Mbps for stability
+FRAMERATE = 30
+BITRATE = 2000000  # 2 Mbps for 1080p
 
 class GStreamerWebRTC:
     def __init__(self):
@@ -41,6 +41,8 @@ class GStreamerWebRTC:
         self.rpicam_restart_count = 0
         self.fps_count = 0
         self.fps_last_time = time.monotonic()
+        self.last_buffer_time = None
+        self.max_gap_ms = 0.0
         
     def create_cloudflare_session(self):
         """Create new Cloudflare session"""
@@ -304,11 +306,18 @@ class GStreamerWebRTC:
 
         src_pad.add_probe(Gst.PadProbeType.BUFFER, self.on_pay_buffer)
         GLib.timeout_add_seconds(1, self.report_fps)
+        GLib.timeout_add_seconds(1, self.report_gaps)
 
     def on_pay_buffer(self, pad, info):
         """Count RTP buffers to estimate FPS"""
         if info.type & Gst.PadProbeType.BUFFER:
             self.fps_count += 1
+            now = time.monotonic()
+            if self.last_buffer_time is not None:
+                gap_ms = (now - self.last_buffer_time) * 1000.0
+                if gap_ms > self.max_gap_ms:
+                    self.max_gap_ms = gap_ms
+            self.last_buffer_time = now
         return Gst.PadProbeReturn.OK
 
     def report_fps(self):
@@ -320,6 +329,14 @@ class GStreamerWebRTC:
             logger.info(f"Measured RTP FPS: {fps:.1f}")
         self.fps_count = 0
         self.fps_last_time = now
+        return True
+
+    def report_gaps(self):
+        """Report max inter-buffer gap (freeze indicator)"""
+        if self.last_buffer_time is None:
+            return True
+        logger.info(f"Max RTP gap (last 1s): {self.max_gap_ms:.0f} ms")
+        self.max_gap_ms = 0.0
         return True
 
     def rtp_caps_ready(self):
@@ -430,7 +447,7 @@ class GStreamerWebRTC:
             '--profile', 'baseline',
             '--level', '4',
             '--bitrate', str(BITRATE),
-            '--intra', '15',        # Force keyframe every 15 frames (~1s at 15fps)
+            '--intra', '30',        # Force keyframe every 30 frames (~1s at 30fps)
             '--inline',              # SPS/PPS in every keyframe
             '--flush',               # Low latency
             '--timeout', '0',        # Run indefinitely
