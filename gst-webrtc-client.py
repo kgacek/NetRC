@@ -352,7 +352,9 @@ class GStreamerWebRTC:
             
             logger.info("Pipeline started successfully!")
             
-            # Negotiation will be triggered automatically when RTP pad connects (on_webrtc_pad_added)
+            # Wait longer for rpicam-vid to start streaming before negotiation
+            logger.info("Waiting for camera stream to stabilize (10 seconds)...")
+            GLib.timeout_add(10000, self.trigger_negotiation)
             
         except Exception as e:
             logger.error(f"Pipeline creation failed: {e}")
