@@ -75,6 +75,7 @@ class GStreamerWebRTC:
         # otwierasz FIFO do czytania w trybie binarnym (blokujące)
         pipeline_str = f"""
         filesrc location={self.fifo_path} do-timestamp=true !
+        queue leaky=downstream max-size-time=0 max-size-bytes=0 max-size-buffers=2 !
         h264parse !
         video/x-h264,stream-format=avc,alignment=au,profile=baseline !
         rtph264pay pt=96 mtu=1200 config-interval=1 aggregate-mode=zero-latency !
