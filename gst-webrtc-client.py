@@ -61,53 +61,20 @@ class GStreamerWebRTC:
     
     def create_pipeline(self):
         """Create GStreamer pipeline reading from rpicam-vid hardware encoder via FIFO"""
-        # Create elements manually for proper pad connection
-        logger.info("Creating GStreamer pipeline elements...")
+        # GStreamer pipeline reads from FIFO (rpicam-vid already running)
+        pipeline_str = f"""
+        filesrc location={self.fifo_path} ! 
+        h264parse config-interval=-1 ! 
+        video/x-h264,stream-format=byte-stream,alignment=au,profile=baseline ! 
+        rtph264pay config-interval=-1 pt=96 mtu=1200 aggregate-mode=zero-latency ! 
+        webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.cloudflare.com:3478
+        """
         
-        self.pipe = Gst.Pipeline.new("pipeline")
+        logger.info("Creating GStreamer pipeline (reading from rpicam-vid FIFO)")
         
-        # Create elements
-        filesrc = Gst.ElementFactory.make("filesrc", "src")
-        filesrc.set_property("location", self.fifo_path)
+        self.pipe = Gst.parse_launch(pipeline_str)
         
-        h264parse = Gst.ElementFactory.make("h264parse", "parse")
-        h264parse.set_property("config-interval", -1)
-        
-        rtph264pay = Gst.ElementFactory.make("rtph264pay", "pay")
-        rtph264pay.set_property("config-interval", -1)
-        rtph264pay.set_property("pt", 96)
-        rtph264pay.set_property("mtu", 1200)
-        
-        self.webrtc = Gst.ElementFactory.make("webrtcbin", "sendrecv")
-        self.webrtc.set_property("bundle-policy", 3)  # max-bundle
-        self.webrtc.set_property("stun-server", "stun://stun.cloudflare.com:3478")
-        
-        # Add elements to pipeline
-        self.pipe.add(filesrc)
-        self.pipe.add(h264parse)
-        self.pipe.add(rtph264pay)
-        self.pipe.add(self.webrtc)
-        
-        # Link elements (webrtcbin needs request pad)
-        filesrc.link(h264parse)
-        h264parse.link(rtph264pay)
-        
-        # Define explicit RTP caps for webrtcbin
-        rtp_caps = Gst.Caps.from_string(
-            "application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000"
-        )
-        
-        # Get request pad from webrtcbin with caps
-        webrtc_sink_pad = self.webrtc.request_pad_simple("sink_%u")
-        pay_src_pad = rtph264pay.get_static_pad("src")
-        
-        # Link with caps
-        result = pay_src_pad.link_filtered(webrtc_sink_pad, rtp_caps)
-        if result != Gst.PadLinkReturn.OK:
-            logger.error(f"Failed to link pads with caps: {result}")
-            raise Exception("Pad linking failed")
-        
-        logger.info(f"Pipeline elements created and linked (webrtc pad: {webrtc_sink_pad.get_name()})")
+        self.webrtc = self.pipe.get_by_name('sendrecv')
         
         # Connect signals
         self.webrtc.connect('on-negotiation-needed', self.on_negotiation_needed)
@@ -141,26 +108,25 @@ class GStreamerWebRTC:
         import requests
         
         logger.info("Sending offer to Cloudflare...")
-        logger.info(f"SDP:\n{offer_sdp}")
+        logger.info(f"Offer SDP:\n{offer_sdp}")
         
-        # Extract video mid
-        video_mid = None
-        for line in offer_sdp.split('\r\n'):
+        # Extract video mid - GStreamer webrtcbin always uses mid=0 for first track
+        video_mid = "0"
+        
+        # Try to find it in SDP anyway
+        lines = offer_sdp.split('\r\n')
+        in_video_section = False
+        for line in lines:
             if line.startswith('m=video'):
-                # Find corresponding a=mid line
-                lines = offer_sdp.split('\r\n')
-                m_idx = lines.index(line)
-                for i in range(m_idx, len(lines)):
-                    if lines[i].startswith('a=mid:'):
-                        video_mid = lines[i].split(':')[1]
-                        logger.info(f"Found video mid: {video_mid}")
-                        break
+                in_video_section = True
+            elif line.startswith('m='):
+                in_video_section = False
+            elif in_video_section and line.startswith('a=mid:'):
+                video_mid = line.split(':')[1].strip()
+                logger.info(f"Found video mid in SDP: {video_mid}")
                 break
         
-        if not video_mid:
-            logger.error("Could not find video mid in SDP")
-            logger.error(f"SDP lines around m=video: {[l for l in offer_sdp.split(chr(10)) if 'video' in l or 'mid' in l]}")
-            return
+        logger.info(f"Using video mid: {video_mid}")
         
         url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/{self.session_id}/tracks/new"
         headers = {
@@ -342,9 +308,9 @@ class GStreamerWebRTC:
             
             logger.info("Pipeline started successfully!")
             
-            # Schedule negotiation after pipeline is ready and data flows
-            logger.info("Scheduling negotiation in 5 seconds...")
-            GLib.timeout_add(5000, self.trigger_negotiation)
+            # Schedule negotiation after pipeline is ready
+            logger.info("Scheduling negotiation in 2 seconds...")
+            GLib.timeout_add(2000, self.trigger_negotiation)
             
         except Exception as e:
             logger.error(f"Pipeline creation failed: {e}")
