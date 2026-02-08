@@ -61,47 +61,52 @@ class GStreamerWebRTC:
                     logger.info("Session registered with signaling server")
     
     def create_pipeline(self):
-        """Create GStreamer pipeline with hardware H.264 encoding"""
-        # Try different hardware encoders for Raspberry Pi
-        # Priority: v4l2h264enc (best) > omxh264enc (deprecated but works) > x264enc (software fallback)
+        """Create GStreamer pipeline reading from rpicam-vid hardware encoder via FIFO"""
+        # Use rpicam-vid with hardware H.264 encoding, output to FIFO
+        # This gives us full control over camera settings and uses hardware encoder
         
+        import os
+        import subprocess
+        
+        # Create FIFO if it doesn't exist
+        fifo_path = '/tmp/h264_fifo'
+        if os.path.exists(fifo_path):
+            os.remove(fifo_path)
+        os.mkfifo(fifo_path)
+        
+        # Start rpicam-vid with hardware encoding in background
+        self.rpicam_process = subprocess.Popen([
+            'rpicam-vid',
+            '--width', str(WIDTH),
+            '--height', str(HEIGHT),
+            '--framerate', str(FRAMERATE),
+            '--codec', 'h264',
+            '--profile', 'baseline',
+            '--level', '4.0',
+            '--bitrate', str(BITRATE),
+            '--inline',              # SPS/PPS in every keyframe
+            '--flush',               # Low latency
+            '--timeout', '0',        # Run indefinitely
+            '--nopreview',           # No preview
+            '--denoise', 'cdn_off',  # Disable denoise for lower latency
+            '-o', fifo_path
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+        logger.info(f"Started rpicam-vid: {WIDTH}x{HEIGHT} @ {FRAMERATE}fps, {BITRATE/1000000}Mbps")
+        
+        # GStreamer pipeline reads from FIFO
         pipeline_str = f"""
-        libcamerasrc ! 
-        video/x-raw,width={WIDTH},height={HEIGHT},framerate={FRAMERATE}/1,format=NV12 ! 
-        v4l2h264enc extra-controls="controls,video_bitrate={BITRATE},repeat_sequence_header=1" ! 
-        video/x-h264,profile=baseline,level=(string)4.0 ! 
+        filesrc location={fifo_path} ! 
         h264parse config-interval=-1 ! 
-        rtph264pay config-interval=-1 pt=96 mtu=1200 ! 
+        video/x-h264,stream-format=byte-stream,alignment=au,profile=baseline ! 
+        rtph264pay config-interval=-1 pt=96 mtu=1200 aggregate-mode=zero-latency ! 
         webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.cloudflare.com:3478
         """
         
-        logger.info("Creating GStreamer pipeline with hardware H.264 encoding")
-        logger.info(f"Resolution: {WIDTH}x{HEIGHT} @ {FRAMERATE}fps, Bitrate: {BITRATE/1000000}Mbps")
+        logger.info("Creating GStreamer pipeline (reading from rpicam-vid FIFO)")
         
-        try:
-            self.pipe = Gst.parse_launch(pipeline_str)
-        except Exception as e:
-            logger.error(f"Failed with v4l2h264enc: {e}")
-            # Fallback to omxh264enc
-            logger.info("Trying omxh264enc...")
-            pipeline_str = pipeline_str.replace('v4l2h264enc', 'omxh264enc target-bitrate=' + str(BITRATE))
-            try:
-                self.pipe = Gst.parse_launch(pipeline_str)
-            except Exception as e2:
-                logger.error(f"Failed with omxh264enc: {e2}")
-                # Final fallback to software encoding
-                logger.warning("Falling back to software x264enc")
-                pipeline_str = f"""
-                libcamerasrc ! 
-                video/x-raw,width={WIDTH},height={HEIGHT},framerate={FRAMERATE}/1 ! 
-                videoconvert ! 
-                x264enc bitrate={BITRATE//1000} speed-preset=ultrafast tune=zerolatency ! 
-                video/x-h264,profile=baseline ! 
-                h264parse ! 
-                rtph264pay pt=96 ! 
-                webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.cloudflare.com:3478
-                """
-                self.pipe = Gst.parse_launch(pipeline_str)
+        self.pipe = Gst.parse_launch(pipeline_str)
+        self.fifo_path = fifo_path
         
         self.webrtc = self.pipe.get_by_name('sendrecv')
         
@@ -262,6 +267,13 @@ class GStreamerWebRTC:
             logger.info("Stopping...")
         finally:
             self.pipe.set_state(Gst.State.NULL)
+            if hasattr(self, 'rpicam_process'):
+                self.rpicam_process.terminate()
+                self.rpicam_process.wait()
+            if hasattr(self, 'fifo_path'):
+                import os
+                if os.path.exists(self.fifo_path):
+                    os.remove(self.fifo_path)
 
 def main():
     if not CLOUDFLARE_APP_ID or not CLOUDFLARE_APP_SECRET:
