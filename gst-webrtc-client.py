@@ -8,8 +8,6 @@ gi.require_version('Gst', '1.0')
 gi.require_version('GstWebRTC', '1.0')
 gi.require_version('GstSdp', '1.0')
 from gi.repository import Gst, GstWebRTC, GstSdp, GLib
-import asyncio
-import aiohttp
 import json
 import os
 import sys
@@ -36,29 +34,30 @@ class GStreamerWebRTC:
         self.pipe = None
         self.webrtc = None
         self.session_id = None
-        self.loop = None
         
-    async def create_cloudflare_session(self):
+    def create_cloudflare_session(self):
         """Create new Cloudflare session"""
+        import requests
+        
         url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/new"
         headers = {'Authorization': f'Bearer {CLOUDFLARE_APP_SECRET}'}
         
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers) as response:
-                if response.status != 201:
-                    raise Exception(f"Failed to create session: {response.status}")
-                data = await response.json()
-                self.session_id = data['sessionId']
-                logger.info(f"Session created: {self.session_id}")
-                
+        response = requests.post(url, headers=headers, timeout=10)
+        if response.status_code != 201:
+            raise Exception(f"Failed to create session: {response.status_code}")
+        
+        data = response.json()
+        self.session_id = data['sessionId']
+        logger.info(f"Session created: {self.session_id}")
+        
         # Register with signaling server
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{SIGNALING_SERVER}/api/sessions",
-                json={'sessionId': self.session_id}
-            ) as response:
-                if response.status == 200:
-                    logger.info("Session registered with signaling server")
+        response = requests.post(
+            f"{SIGNALING_SERVER}/api/sessions",
+            json={'sessionId': self.session_id},
+            timeout=10
+        )
+        if response.status_code == 200:
+            logger.info("Session registered with signaling server")
     
     def create_pipeline(self):
         """Create GStreamer pipeline reading from rpicam-vid hardware encoder via FIFO"""
@@ -251,10 +250,10 @@ class GStreamerWebRTC:
         
         return True  # Keep calling
     
-    async def run(self):
+    def run(self):
         """Main run loop"""
         # Create Cloudflare session
-        await self.create_cloudflare_session()
+        self.create_cloudflare_session()
         
         # Create pipeline
         self.create_pipeline()
@@ -265,7 +264,7 @@ class GStreamerWebRTC:
         # Schedule negotiation after pipeline is ready
         GLib.timeout_add(2000, self.trigger_negotiation)  # 2 seconds delay
         
-        # Run GLib main loop in a thread
+        # Run GLib main loop
         logger.info("Streaming started! Press Ctrl+C to stop.")
         self.main_loop = GLib.MainLoop()
         
@@ -290,7 +289,7 @@ def main():
         sys.exit(1)
     
     client = GStreamerWebRTC()
-    asyncio.run(client.run())
+    client.run()
 
 if __name__ == '__main__':
     main()
