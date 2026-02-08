@@ -537,7 +537,7 @@ class GStreamerWebRTC:
             '--profile', 'baseline',
             '--level', '4',
             '--bitrate', str(BITRATE),
-            '--intra', '30',        # Force keyframe every 30 frames (~1s at 30fps)
+            '--intra', '15',        # Force keyframe every 15 frames (~0.5s at 30fps)
             '--inline',              # SPS/PPS in every keyframe
             '--flush',               # Low latency
             '--timeout', '0',        # Run indefinitely
