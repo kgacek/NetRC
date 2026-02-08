@@ -221,6 +221,10 @@ class GStreamerWebRTC:
         if ret == Gst.StateChangeReturn.FAILURE:
             logger.error("Failed to start pipeline")
             sys.exit(1)
+        elif ret == Gst.StateChangeReturn.ASYNC:
+            logger.info("Pipeline state change is ASYNC, waiting...")
+        
+        logger.info(f"Pipeline set_state returned: {ret}")
         
         # Monitor pipeline stats
         GLib.timeout_add_seconds(5, self.print_stats)
