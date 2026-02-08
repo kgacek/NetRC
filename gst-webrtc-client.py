@@ -82,7 +82,17 @@ class GStreamerWebRTC:
         # Connect signals
         self.webrtc.connect('on-negotiation-needed', self.on_negotiation_needed)
         self.webrtc.connect('on-ice-candidate', self.on_ice_candidate)
+        self.webrtc.connect('notify::ice-connection-state', self.on_ice_connection_state)
         self.webrtc.connect('notify::ice-gathering-state', self.on_ice_gathering_state)
+        self.webrtc.connect('pad-added', self.on_webrtc_pad_added)
+        
+        # Add video transceiver explicitly (fixes missing media section in SDP)
+        caps = Gst.Caps.from_string("application/x-rtp,media=video,encoding-name=H264,payload=96")
+        self.webrtc.emit('add-transceiver', GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY, caps)
+        logger.info("Added video transceiver")
+        
+        # Flag to track if negotiation has been triggered
+        self.negotiation_done = False
         
         # Track ICE gathering state
         self.pending_offer_sdp = None
@@ -113,6 +123,16 @@ class GStreamerWebRTC:
     def on_ice_candidate(self, element, mlineindex, candidate):
         """Handle ICE candidate - not needed with ice-lite server"""
         logger.debug(f"ICE candidate: {candidate}")
+    
+    def on_webrtc_pad_added(self, element, pad):
+        """Called when pad is added to webrtcbin - trigger negotiation"""
+        logger.info(f"WebRTC pad added: {pad.get_name()}, caps: {pad.get_current_caps()}")
+        
+        # Trigger negotiation once when first pad is added (means rtph264pay connected)
+        if not self.negotiation_done:
+            self.negotiation_done = True
+            logger.info("RTP pad connected, triggering negotiation in 1 second...")
+            GLib.timeout_add(1000, self.trigger_negotiation)
     
     def on_ice_gathering_state(self, element, pspec):
         """Monitor ICE gathering state"""
@@ -315,9 +335,7 @@ class GStreamerWebRTC:
             
             logger.info("Pipeline started successfully!")
             
-            # Schedule negotiation after pipeline is ready
-            logger.info("Scheduling negotiation in 2 seconds...")
-            GLib.timeout_add(5000, self.trigger_negotiation)
+            # Negotiation will be triggered automatically when RTP pad connects (on_webrtc_pad_added)
             
         except Exception as e:
             logger.error(f"Pipeline creation failed: {e}")
