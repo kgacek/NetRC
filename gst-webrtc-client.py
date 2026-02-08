@@ -61,27 +61,39 @@ class GStreamerWebRTC:
     
     def create_pipeline(self):
         """Create GStreamer pipeline reading from rpicam-vid hardware encoder via FIFO"""
-        # GStreamer pipeline reads from FIFO (rpicam-vid already running)
-        # Note: We need to manually connect to webrtcbin sink pad
-        pipeline_str = f"""
-        filesrc location={self.fifo_path} name=src ! 
-        h264parse config-interval=-1 ! 
-        video/x-h264,stream-format=byte-stream,alignment=au,profile=baseline ! 
-        rtph264pay config-interval=-1 pt=96 mtu=1200 aggregate-mode=zero-latency name=pay ! 
-        webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.cloudflare.com:3478
-        """
+        # Create elements manually for proper pad connection
+        logger.info("Creating GStreamer pipeline elements...")
         
-        logger.info("Creating GStreamer pipeline (reading from rpicam-vid FIFO)")
+        self.pipe = Gst.Pipeline.new("pipeline")
         
-        self.pipe = Gst.parse_launch(pipeline_str)
+        # Create elements
+        filesrc = Gst.ElementFactory.make("filesrc", "src")
+        filesrc.set_property("location", self.fifo_path)
         
-        self.webrtc = self.pipe.get_by_name('sendrecv')
+        h264parse = Gst.ElementFactory.make("h264parse", "parse")
+        h264parse.set_property("config-interval", -1)
         
-        # Add transceiver for video - this is CRITICAL for webrtcbin to include m=video in SDP
-        caps = Gst.Caps.from_string("application/x-rtp")
-        direction = GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY
-        self.webrtc.emit('add-transceiver', direction, caps)
-        logger.info("Added video transceiver")
+        rtph264pay = Gst.ElementFactory.make("rtph264pay", "pay")
+        rtph264pay.set_property("config-interval", -1)
+        rtph264pay.set_property("pt", 96)
+        rtph264pay.set_property("mtu", 1200)
+        
+        self.webrtc = Gst.ElementFactory.make("webrtcbin", "sendrecv")
+        self.webrtc.set_property("bundle-policy", 3)  # max-bundle
+        self.webrtc.set_property("stun-server", "stun://stun.cloudflare.com:3478")
+        
+        # Add elements to pipeline
+        self.pipe.add(filesrc)
+        self.pipe.add(h264parse)
+        self.pipe.add(rtph264pay)
+        self.pipe.add(self.webrtc)
+        
+        # Link elements
+        filesrc.link(h264parse)
+        h264parse.link(rtph264pay)
+        rtph264pay.link(self.webrtc)
+        
+        logger.info("Pipeline elements created and linked")
         
         # Connect signals
         self.webrtc.connect('on-negotiation-needed', self.on_negotiation_needed)
