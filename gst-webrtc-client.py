@@ -282,7 +282,7 @@ class GStreamerWebRTC:
             '--framerate', str(FRAMERATE),
             '--codec', 'h264',
             '--profile', 'baseline',
-            '--level', '4.0',
+            '--level', '4',
             '--bitrate', str(BITRATE),
             '--inline',              # SPS/PPS in every keyframe
             '--flush',               # Low latency
