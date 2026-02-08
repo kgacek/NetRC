@@ -92,10 +92,20 @@ class GStreamerWebRTC:
         filesrc.link(h264parse)
         h264parse.link(rtph264pay)
         
-        # Get request pad from webrtcbin
-        webrtc_sink_pad = self.webrtc.get_request_pad("sink_%u")
+        # Define explicit RTP caps for webrtcbin
+        rtp_caps = Gst.Caps.from_string(
+            "application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000"
+        )
+        
+        # Get request pad from webrtcbin with caps
+        webrtc_sink_pad = self.webrtc.request_pad_simple("sink_%u")
         pay_src_pad = rtph264pay.get_static_pad("src")
-        pay_src_pad.link(webrtc_sink_pad)
+        
+        # Link with caps
+        result = pay_src_pad.link_filtered(webrtc_sink_pad, rtp_caps)
+        if result != Gst.PadLinkReturn.OK:
+            logger.error(f"Failed to link pads with caps: {result}")
+            raise Exception("Pad linking failed")
         
         logger.info(f"Pipeline elements created and linked (webrtc pad: {webrtc_sink_pad.get_name()})")
         
@@ -332,9 +342,9 @@ class GStreamerWebRTC:
             
             logger.info("Pipeline started successfully!")
             
-            # Schedule negotiation after pipeline is ready
-            logger.info("Scheduling negotiation in 2 seconds...")
-            GLib.timeout_add(2000, self.trigger_negotiation)
+            # Schedule negotiation after pipeline is ready and data flows
+            logger.info("Scheduling negotiation in 5 seconds...")
+            GLib.timeout_add(5000, self.trigger_negotiation)
             
         except Exception as e:
             logger.error(f"Pipeline creation failed: {e}")
