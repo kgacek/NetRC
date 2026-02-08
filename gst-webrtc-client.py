@@ -74,8 +74,7 @@ class GStreamerWebRTC:
         # GStreamer pipeline reads from FIFO (rpicam-vid already running)
         # otwierasz FIFO do czytania w trybie binarnym (blokujące)
         pipeline_str = f"""
-        filesrc location={self.fifo_path} do-timestamp=true!
-        identity do-timestamp=true !
+        filesrc location={self.fifo_path} do-timestamp=true !
         queue leaky=downstream max-size-time=1000000000 !
         h264parse !
         video/x-h264,stream-format=avc,alignment=au,profile=baseline !
