@@ -28,7 +28,7 @@ SIGNALING_SERVER = os.getenv('SIGNALING_SERVER', 'https://79-76-127-159.nip.io')
 WIDTH = 1920
 HEIGHT = 1080
 FRAMERATE = 30
-BITRATE = 2000000  # 2 Mbps for 1080p
+BITRATE = 6000000  # 6 Mbps for 1080p quality
 
 class GStreamerWebRTC:
     def __init__(self):
@@ -542,7 +542,7 @@ class GStreamerWebRTC:
             '--flush',               # Low latency
             '--timeout', '0',        # Run indefinitely
             '--nopreview',           # No preview
-            '--denoise', 'cdn_off',  # Disable denoise for lower latency
+            '--denoise', 'cdn_fast', # Reduce noise for better compression quality
             '-o', self.fifo_path
         ], stdout=subprocess.DEVNULL, stderr=stderr_log)
         logger.info(f"Started rpicam-vid: {WIDTH}x{HEIGHT} @ {FRAMERATE}fps, {BITRATE/1000000}Mbps")
