@@ -24,11 +24,11 @@ CLOUDFLARE_APP_SECRET = os.getenv('CF_REALTIME_TOKEN')
 CLOUDFLARE_API_BASE = 'https://rtc.live.cloudflare.com/v1'
 SIGNALING_SERVER = os.getenv('SIGNALING_SERVER', 'https://79-76-127-159.nip.io')
 
-# Video configuration
-WIDTH = 1920
-HEIGHT = 1080
-FRAMERATE = 30
-BITRATE = 6000000  # 6 Mbps for 1080p quality
+# Video configuration (overridable via env)
+WIDTH = int(os.getenv('STREAM_WIDTH', '1920'))
+HEIGHT = int(os.getenv('STREAM_HEIGHT', '1080'))
+FRAMERATE = int(os.getenv('STREAM_FPS', '30'))
+BITRATE = int(os.getenv('STREAM_BITRATE', '6000000'))  # 6 Mbps for 1080p quality
 
 class GStreamerWebRTC:
     def __init__(self):
