@@ -28,7 +28,7 @@ SIGNALING_SERVER = os.getenv('SIGNALING_SERVER', 'https://79-76-127-159.nip.io')
 WIDTH = 1920
 HEIGHT = 1080
 FRAMERATE = 25
-BITRATE = 10000000  # 10 Mbps for 1080p
+BITRATE = 5000000  # 5 Mbps for 1080p
 
 class GStreamerWebRTC:
     def __init__(self):
@@ -74,9 +74,9 @@ class GStreamerWebRTC:
         # GStreamer pipeline reads from FIFO (rpicam-vid already running)
         pipeline_str = f"""
         filesrc location={self.fifo_path} ! 
-        h264parse config-interval=-1 ! 
+        h264parse ! 
         video/x-h264,stream-format=byte-stream,alignment=au,profile=baseline ! 
-        rtph264pay config-interval=-1 pt=96 mtu=1200 aggregate-mode=zero-latency ! 
+        rtph264pay config-interval=1 pt=96 mtu=1200 aggregate-mode=zero-latency ! 
         webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.cloudflare.com:3478
         """
         
