@@ -72,9 +72,11 @@ class GStreamerWebRTC:
     def create_pipeline(self):
         """Create GStreamer pipeline reading from rpicam-vid hardware encoder via FIFO"""
         # GStreamer pipeline reads from FIFO (rpicam-vid already running)
+        # otwierasz FIFO do czytania w trybie binarnym (blokujące)
+        self.fifo_fd = os.open(self.fifo_path, os.O_RDONLY)
+
         pipeline_str = f"""
-        filesrc location={self.fifo_path} !
-        identity do-timestamp=true !
+        fdsrc fd={self.fifo_fd} do-timestamp=true !
         queue leaky=downstream max-size-time=1000000000 !
         h264parse !
         video/x-h264,stream-format=avc,alignment=au,profile=baseline !
