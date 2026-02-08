@@ -89,26 +89,6 @@ class GStreamerWebRTC:
         
     def on_negotiation_needed(self, element):
         """Handle negotiation needed"""
-        # Debug: check pipeline pads
-        filesrc = self.pipe.get_by_name('filesrc0')
-        if filesrc:
-            src_pad = filesrc.get_static_pad('src')
-            logger.info(f"filesrc src pad: {src_pad}, is-linked: {src_pad.is_linked() if src_pad else 'N/A'}")
-        
-        # Check webrtcbin sink pads
-        iterator = element.iterate_sink_pads()
-        pads = []
-        while True:
-            result, pad = iterator.next()
-            if result != Gst.IteratorResult.OK:
-                break
-            pads.append(pad.get_name())
-        logger.info(f"webrtcbin sink pads: {pads}")
-        
-        # Debug: check transceivers
-        n_transceivers = element.emit('get-transceivers')
-        logger.info(f"Number of transceivers: {len(n_transceivers) if n_transceivers else 0}")
-        
         logger.info("Negotiation needed, creating offer...")
         promise = Gst.Promise.new_with_change_func(self.on_offer_created, element, None)
         element.emit('create-offer', None, promise)
@@ -285,7 +265,7 @@ class GStreamerWebRTC:
             
             # Schedule pipeline creation after rpicam-vid initializes
             logger.info("Scheduling pipeline creation in 3 seconds...")
-            GLib.timeout_add(3000, self.create_and_start_pipeline)
+            GLib.timeout_add(6000, self.create_and_start_pipeline)
             
         except Exception as e:
             logger.error(f"Initialization failed: {e}")
@@ -335,8 +315,8 @@ class GStreamerWebRTC:
             
             logger.info("Pipeline started successfully!")
             
-            # Schedule negotiation after pipeline has received data
-            logger.info("Scheduling negotiation in 5 seconds...")
+            # Schedule negotiation after pipeline is ready
+            logger.info("Scheduling negotiation in 2 seconds...")
             GLib.timeout_add(5000, self.trigger_negotiation)
             
         except Exception as e:
