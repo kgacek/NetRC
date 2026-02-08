@@ -252,29 +252,20 @@ class GStreamerWebRTC:
     
     def run(self):
         """Main run loop"""
-        # Create Cloudflare session
-        self.create_cloudflare_session()
-        
-        # Create pipeline
-        self.create_pipeline()
-        
-        # Start pipeline in playing state
-        self.start_pipeline()
-        
-        # Schedule negotiation after pipeline is ready
-        GLib.timeout_add(2000, self.trigger_negotiation)  # 2 seconds delay
+        # Schedule initialization in GLib idle callback
+        GLib.idle_add(self.initialize)
         
         # Run GLib main loop
-        logger.info("Streaming started! Press Ctrl+C to stop.")
+        logger.info("Starting GLib main loop...")
         self.main_loop = GLib.MainLoop()
         
         try:
-            # Run main loop
             self.main_loop.run()
         except KeyboardInterrupt:
             logger.info("Stopping...")
         finally:
-            self.pipe.set_state(Gst.State.NULL)
+            if self.pipe:
+                self.pipe.set_state(Gst.State.NULL)
             if hasattr(self, 'rpicam_process'):
                 self.rpicam_process.terminate()
                 self.rpicam_process.wait()
@@ -282,6 +273,28 @@ class GStreamerWebRTC:
                 import os
                 if os.path.exists(self.fifo_path):
                     os.remove(self.fifo_path)
+    
+    def initialize(self):
+        """Initialize pipeline (called from GLib idle)"""
+        try:
+            # Create Cloudflare session
+            self.create_cloudflare_session()
+            
+            # Create pipeline
+            self.create_pipeline()
+            
+            # Start pipeline
+            self.start_pipeline()
+            
+            # Schedule negotiation after pipeline is ready
+            logger.info("Scheduling negotiation in 2 seconds...")
+            GLib.timeout_add(2000, self.trigger_negotiation)
+            
+        except Exception as e:
+            logger.error(f"Initialization failed: {e}")
+            self.main_loop.quit()
+        
+        return False  # Don't repeat idle callback
 
 def main():
     if not CLOUDFLARE_APP_ID or not CLOUDFLARE_APP_SECRET:
