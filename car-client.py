@@ -63,15 +63,30 @@ class PiCameraTrack(VideoStreamTrack):
         """
         Generate video frames
         """
+        recv_start = time.time()
         pts, time_base = await self.next_timestamp()
         
         if self.camera:
+            # Track recv() call timing
+            current_time = time.time()
+            if not hasattr(self, 'last_recv_time'):
+                self.last_recv_time = current_time
+                self.recv_intervals = []
+            
+            recv_interval = current_time - self.last_recv_time
+            self.recv_intervals.append(recv_interval)
+            self.last_recv_time = current_time
+            
             # Capture frame from Pi Camera
+            capture_start = time.time()
             frame_array = self.camera.capture_array()
+            capture_time = time.time() - capture_start
+            
+            create_start = time.time()
             frame = VideoFrame.from_ndarray(frame_array, format="yuv420p")
+            create_time = time.time() - create_start
             
             # FPS monitoring using actual wall clock time
-            current_time = time.time()
             if not hasattr(self, 'last_log_time'):
                 self.last_log_time = current_time
                 self.frames_since_log = 0
@@ -81,9 +96,19 @@ class PiCameraTrack(VideoStreamTrack):
             
             if time_elapsed >= 5.0:  # Log every 5 seconds
                 actual_fps = self.frames_since_log / time_elapsed
-                logger.info(f"Actual streaming FPS: {actual_fps:.2f}")
+                
+                # Calculate average recv() interval
+                if len(self.recv_intervals) > 10:
+                    avg_interval = sum(self.recv_intervals[-30:]) / min(30, len(self.recv_intervals))
+                    interval_fps = 1.0 / avg_interval if avg_interval > 0 else 0
+                    logger.info(f"recv() called at {interval_fps:.2f} FPS | Actual FPS: {actual_fps:.2f}")
+                    logger.info(f"Timing - Capture: {capture_time*1000:.1f}ms | Create: {create_time*1000:.1f}ms | Interval: {avg_interval*1000:.1f}ms")
+                else:
+                    logger.info(f"Actual streaming FPS: {actual_fps:.2f}")
+                    
                 self.last_log_time = current_time
                 self.frames_since_log = 0
+                self.recv_intervals = []
         else:
             # Simple test pattern fallback
             import numpy as np
