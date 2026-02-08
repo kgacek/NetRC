@@ -45,6 +45,8 @@ class GStreamerWebRTC:
         self.last_buffer_time = None
         self.max_gap_ms = 0.0
         self.bytes_count = 0
+        self.packet_count = 0
+        self.max_packet_size = 0
         
     def create_cloudflare_session(self):
         """Create new Cloudflare session"""
@@ -312,23 +314,45 @@ class GStreamerWebRTC:
             logger.warning("rtph264pay src pad not found for FPS probe")
             return
 
-        src_pad.add_probe(Gst.PadProbeType.BUFFER, self.on_pay_buffer)
+        src_pad.add_probe(Gst.PadProbeType.BUFFER | Gst.PadProbeType.BUFFER_LIST, self.on_pay_buffer)
         GLib.timeout_add_seconds(1, self.report_fps)
         GLib.timeout_add_seconds(1, self.report_gaps)
 
     def on_pay_buffer(self, pad, info):
         """Count RTP buffers to estimate FPS"""
+        now = time.monotonic()
         if info.type & Gst.PadProbeType.BUFFER:
             self.fps_count += 1
             buf = info.get_buffer()
             if buf:
-                self.bytes_count += buf.get_size()
-            now = time.monotonic()
+                size = buf.get_size()
+                self.bytes_count += size
+                self.packet_count += 1
+                if size > self.max_packet_size:
+                    self.max_packet_size = size
             if self.last_buffer_time is not None:
                 gap_ms = (now - self.last_buffer_time) * 1000.0
                 if gap_ms > self.max_gap_ms:
                     self.max_gap_ms = gap_ms
             self.last_buffer_time = now
+
+        if info.type & Gst.PadProbeType.BUFFER_LIST:
+            blist = info.get_buffer_list()
+            if blist:
+                self.fps_count += blist.length()
+                for i in range(blist.length()):
+                    buf = blist.get(i)
+                    if buf:
+                        size = buf.get_size()
+                        self.bytes_count += size
+                        self.packet_count += 1
+                        if size > self.max_packet_size:
+                            self.max_packet_size = size
+                if self.last_buffer_time is not None:
+                    gap_ms = (now - self.last_buffer_time) * 1000.0
+                    if gap_ms > self.max_gap_ms:
+                        self.max_gap_ms = gap_ms
+                self.last_buffer_time = now
         return Gst.PadProbeReturn.OK
 
     def report_fps(self):
@@ -338,9 +362,13 @@ class GStreamerWebRTC:
         if elapsed > 0:
             fps = self.fps_count / elapsed
             bitrate_kbps = (self.bytes_count * 8) / (elapsed * 1000.0)
-            logger.info(f"Measured RTP FPS: {fps:.1f}, bitrate: {bitrate_kbps:.0f} kbps")
+            avg_size = (self.bytes_count / self.packet_count) if self.packet_count else 0
+            logger.info(
+                f"Measured RTP FPS: {fps:.1f}, bitrate: {bitrate_kbps:.0f} kbps, avg_pkt: {avg_size:.0f}B, max_pkt: {self.max_packet_size}B")
         self.fps_count = 0
         self.bytes_count = 0
+        self.packet_count = 0
+        self.max_packet_size = 0
         self.fps_last_time = now
         return True
 
