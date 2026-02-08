@@ -281,20 +281,21 @@ class GStreamerWebRTC:
         
         logger.info("Remote description set, streaming started!")
     
-    def start_pipeline(self):
+    def start_pipeline(self, state=Gst.State.PLAYING):
         """Start the GStreamer pipeline"""
-        logger.info("Starting pipeline...")
-        ret = self.pipe.set_state(Gst.State.PLAYING)
+        logger.info(f"Setting pipeline to {state}...")
+        ret = self.pipe.set_state(state)
         if ret == Gst.StateChangeReturn.FAILURE:
-            logger.error("Failed to start pipeline")
+            logger.error("Failed to change pipeline state")
             sys.exit(1)
         elif ret == Gst.StateChangeReturn.ASYNC:
             logger.info("Pipeline state change is ASYNC, waiting...")
         
         logger.info(f"Pipeline set_state returned: {ret}")
         
-        # Monitor pipeline stats
-        GLib.timeout_add_seconds(5, self.print_stats)
+        # Monitor pipeline stats (only start if going to PLAYING)
+        if state == Gst.State.PLAYING:
+            GLib.timeout_add_seconds(5, self.print_stats)
     
     def trigger_negotiation(self):
         """Trigger WebRTC negotiation"""
@@ -351,12 +352,7 @@ class GStreamerWebRTC:
             # Create Cloudflare session
             self.create_cloudflare_session()
             
-            # Start rpicam-vid process (returns immediately)
-            self.start_rpicam()
-            
-            # Schedule pipeline creation after rpicam-vid initializes
-            logger.info("Scheduling pipeline creation in 3 seconds...")
-            GLib.timeout_add(6000, self.create_and_start_pipeline)
+            # Create and start pipeline (will start rpicam internally)\n            self.create_and_start_pipeline()
             
         except Exception as e:
             logger.error(f"Initialization failed: {e}")
@@ -396,23 +392,36 @@ class GStreamerWebRTC:
         logger.info(f"Started rpicam-vid: {WIDTH}x{HEIGHT} @ {FRAMERATE}fps, {BITRATE/1000000}Mbps")
     
     def create_and_start_pipeline(self):
-        """Create and start GStreamer pipeline (called after rpicam-vid delay)"""
+        """Create and start GStreamer pipeline"""
         try:
-            # Create pipeline
+            # Create pipeline first (before rpicam starts writing)
             self.create_pipeline()
             
-            # Start pipeline
-            self.start_pipeline()
+            # Set pipeline to PAUSED (filesrc ready to read but not yet blocking)
+            self.start_pipeline(Gst.State.PAUSED)
+            logger.info("Pipeline in PAUSED state, ready to receive data")
             
-            logger.info("Pipeline started successfully!")
+            # Now start rpicam-vid to write to FIFO
+            self.start_rpicam()
             
-            # Start checking for caps negotiation every second
-            logger.info("Waiting for caps to be negotiated...")
-            GLib.timeout_add(1000, self.check_caps_negotiated)
+            # Wait 2 seconds for rpicam to start, then set to PLAYING
+            GLib.timeout_add(2000, self.start_playing)
             
         except Exception as e:
             logger.error(f"Pipeline creation failed: {e}")
             self.main_loop.quit()
+        
+        return False  # Don't repeat
+    
+    def start_playing(self):
+        """Transition pipeline to PLAYING state and start caps checking"""
+        logger.info("Starting pipeline playback...")
+        self.start_pipeline(Gst.State.PLAYING)
+        logger.info("Pipeline started successfully!")
+        
+        # Start checking for caps negotiation every second
+        logger.info("Waiting for caps to be negotiated...")
+        GLib.timeout_add(1000, self.check_caps_negotiated)
         
         return False  # Don't repeat
 
