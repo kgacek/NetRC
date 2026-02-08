@@ -68,7 +68,7 @@ class PiCameraTrack(VideoStreamTrack):
         if self.camera:
             # Capture frame from Pi Camera
             frame_array = self.camera.capture_array()
-            frame = VideoFrame.from_ndarray(frame_array, format="rgb24")
+            frame = VideoFrame.from_ndarray(frame_array, format="yuv420p")
             
             # FPS monitoring using actual wall clock time
             current_time = time.time()
@@ -88,8 +88,8 @@ class PiCameraTrack(VideoStreamTrack):
             # Simple test pattern fallback
             import numpy as np
             frame = VideoFrame.from_ndarray(
-                np.full((H, W, 3), self.counter % 256, dtype=np.uint8),
-                format="rgb24"
+                np.full((H, W, 2), self.counter % 256, dtype=np.uint8),
+                format="yuv420p"
             )
             self.counter += 1
             
