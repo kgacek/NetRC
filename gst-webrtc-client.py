@@ -51,13 +51,16 @@ class GStreamerWebRTC:
         logger.info(f"Session created: {self.session_id}")
         
         # Register with signaling server
-        response = requests.post(
-            f"{SIGNALING_SERVER}/api/sessions",
-            json={'sessionId': self.session_id},
-            timeout=10
-        )
-        if response.status_code == 200:
-            logger.info("Session registered with signaling server")
+        try:
+            response = requests.post(
+                f"{SIGNALING_SERVER}/api/publish",
+                json={'sessionId': self.session_id},
+                timeout=5
+            )
+            if response.status_code == 200:
+                logger.info("Session registered with signaling server")
+        except Exception as e:
+            logger.warning(f"Failed to register with signaling server: {e}")
     
     def create_pipeline(self):
         """Create GStreamer pipeline reading from rpicam-vid hardware encoder via FIFO"""
