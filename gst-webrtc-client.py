@@ -93,6 +93,11 @@ class GStreamerWebRTC:
         
         logger.info(f"Started rpicam-vid: {WIDTH}x{HEIGHT} @ {FRAMERATE}fps, {BITRATE/1000000}Mbps")
         
+        # Wait for rpicam-vid to initialize and start writing to FIFO
+        import time
+        logger.info("Waiting 3 seconds for rpicam-vid to initialize...")
+        time.sleep(3)
+        
         # GStreamer pipeline reads from FIFO
         pipeline_str = f"""
         filesrc location={fifo_path} ! 
