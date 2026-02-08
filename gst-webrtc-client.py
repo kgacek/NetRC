@@ -99,8 +99,8 @@ class GStreamerWebRTC:
         if self.transceiver:
             self.transceiver.connect('notify::sender', self.on_transceiver_sender_ready)
         
-        # Flag to track if negotiation has been triggered
-        self.negotiation_done = False
+        # Flag to track if negotiation has been started
+        self.negotiation_started = False
         self.rtp_caps_check_count = 0
         
         # Track ICE gathering state
@@ -108,6 +108,10 @@ class GStreamerWebRTC:
         
     def on_negotiation_needed(self, element):
         """Handle negotiation needed"""
+        if self.negotiation_started:
+            logger.info("Negotiation already started, ignoring.")
+            return
+        self.negotiation_started = True
         logger.info("Negotiation needed, creating offer...")
         promise = Gst.Promise.new_with_change_func(self.on_offer_created, element, None)
         element.emit('create-offer', None, promise)
@@ -138,17 +142,15 @@ class GStreamerWebRTC:
         logger.info(f"WebRTC pad added: {pad.get_name()}, caps: {pad.get_current_caps()}")
         
         # Trigger negotiation once when first pad is added (means rtph264pay connected)
-        if not self.negotiation_done:
-            self.negotiation_done = True
+        if not self.negotiation_started:
             logger.info("RTP pad connected, triggering negotiation in 1 second...")
             GLib.timeout_add(1000, self.trigger_negotiation)
     
     def on_transceiver_sender_ready(self, transceiver, pspec):
         """Called when transceiver sender is ready"""
         sender = transceiver.get_property('sender')
-        if sender and not self.negotiation_done:
+        if sender and not self.negotiation_started:
             logger.info(f"Transceiver sender ready, triggering negotiation...")
-            self.negotiation_done = True
             GLib.timeout_add(500, self.trigger_negotiation)
     
     def on_ice_gathering_state(self, element, pspec):
@@ -258,7 +260,7 @@ class GStreamerWebRTC:
 
     def check_rtp_caps_ready(self):
         """Wait until rtph264pay has negotiated caps with a concrete payload"""
-        if self.negotiation_done:
+        if self.negotiation_started:
             return False
 
         self.rtp_caps_check_count += 1
@@ -280,7 +282,6 @@ class GStreamerWebRTC:
             caps_str = caps.to_string()
             if "payload=(int)96" in caps_str:
                 logger.info("RTP caps negotiated (payload=96), triggering negotiation...")
-                self.negotiation_done = True
                 GLib.timeout_add(100, self.trigger_negotiation)
                 return False
 
@@ -291,6 +292,8 @@ class GStreamerWebRTC:
     
     def trigger_negotiation(self):
         """Trigger WebRTC negotiation"""
+        if self.negotiation_started:
+            return False
         logger.info("Triggering negotiation...")
         self.on_negotiation_needed(self.webrtc)
         return False  # Don't repeat
