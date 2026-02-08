@@ -221,8 +221,17 @@ class GStreamerWebRTC:
             logger.error("Failed to start pipeline")
             sys.exit(1)
         
+        # Manually trigger negotiation after pipeline starts
+        GLib.timeout_add_seconds(2, self.trigger_negotiation)
+        
         # Monitor pipeline stats
         GLib.timeout_add_seconds(5, self.print_stats)
+    
+    def trigger_negotiation(self):
+        """Trigger WebRTC negotiation"""
+        logger.info("Triggering negotiation...")
+        self.on_negotiation_needed(self.webrtc)
+        return False  # Don't repeat
     
     def print_stats(self):
         """Print pipeline statistics"""
