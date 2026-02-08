@@ -139,6 +139,11 @@ class GStreamerWebRTC:
         state = element.get_property('ice-gathering-state')
         logger.info(f"ICE gathering state: {state}")
     
+    def on_ice_connection_state(self, element, pspec):
+        """Monitor ICE connection state"""
+        state = element.get_property('ice-connection-state')
+        logger.info(f"ICE connection state: {state}")
+    
     def send_offer_to_cloudflare(self, offer_sdp):
         """Send offer to Cloudflare Calls API (synchronous)"""
         import requests
