@@ -74,9 +74,9 @@ class GStreamerWebRTC:
         # GStreamer pipeline reads from FIFO (rpicam-vid already running)
         pipeline_str = f"""
         filesrc location={self.fifo_path} ! 
-        h264parse config-interval=-1 ! 
+        h264parse config-interval=1 ! 
         video/x-h264,stream-format=byte-stream,alignment=au,profile=baseline ! 
-        rtph264pay config-interval=-1 pt=96 mtu=1200 aggregate-mode=zero-latency ! 
+        rtph264pay config-interval=1 pt=96 mtu=1200 aggregate-mode=zero-latency ! 
         webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.cloudflare.com:3478
         """
         
@@ -430,6 +430,7 @@ class GStreamerWebRTC:
             '--profile', 'baseline',
             '--level', '4',
             '--bitrate', str(BITRATE),
+            '--intra', '30',        # Force keyframe every 30 frames (~1s at 30fps)
             '--inline',              # SPS/PPS in every keyframe
             '--flush',               # Low latency
             '--timeout', '0',        # Run indefinitely
