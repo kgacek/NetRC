@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import logging
+import stat
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -34,6 +35,9 @@ class GStreamerWebRTC:
         self.pipe = None
         self.webrtc = None
         self.session_id = None
+        self.fifo_path = '/tmp/h264_fifo'
+        self.rpicam_process = None
+        self.rpicam_restart_count = 0
         
     def create_cloudflare_session(self):
         """Create new Cloudflare session"""
@@ -97,6 +101,7 @@ class GStreamerWebRTC:
         
         # Flag to track if negotiation has been triggered
         self.negotiation_done = False
+        self.rtp_caps_check_count = 0
         
         # Track ICE gathering state
         self.pending_offer_sdp = None
@@ -241,6 +246,48 @@ class GStreamerWebRTC:
         
         # Monitor pipeline stats
         GLib.timeout_add_seconds(5, self.print_stats)
+
+    def ensure_fifo(self):
+        """Ensure FIFO exists without removing it while in use"""
+        if os.path.exists(self.fifo_path):
+            if not stat.S_ISFIFO(os.stat(self.fifo_path).st_mode):
+                raise RuntimeError(f"{self.fifo_path} exists and is not a FIFO")
+            return
+        os.mkfifo(self.fifo_path)
+        logger.info(f"Created FIFO at {self.fifo_path}")
+
+    def check_rtp_caps_ready(self):
+        """Wait until rtph264pay has negotiated caps with a concrete payload"""
+        if self.negotiation_done:
+            return False
+
+        self.rtp_caps_check_count += 1
+
+        # If rpicam died, try to restart it (without touching FIFO)
+        if self.rpicam_process and self.rpicam_process.poll() is not None:
+            self.rpicam_restart_count += 1
+            logger.warning(f"rpicam-vid exited, restarting (attempt {self.rpicam_restart_count})")
+            self.start_rpicam()
+
+        pay = self.pipe.get_by_name('rtph264pay0')
+        if not pay:
+            logger.debug("Waiting for rtph264pay element...")
+            return True
+
+        src_pad = pay.get_static_pad('src')
+        caps = src_pad.get_current_caps() if src_pad else None
+        if caps:
+            caps_str = caps.to_string()
+            if "payload=(int)96" in caps_str:
+                logger.info("RTP caps negotiated (payload=96), triggering negotiation...")
+                self.negotiation_done = True
+                GLib.timeout_add(100, self.trigger_negotiation)
+                return False
+
+        if self.rtp_caps_check_count % 5 == 0:
+            logger.info("Waiting for RTP caps negotiation...")
+
+        return True
     
     def trigger_negotiation(self):
         """Trigger WebRTC negotiation"""
@@ -297,12 +344,15 @@ class GStreamerWebRTC:
             # Create Cloudflare session
             self.create_cloudflare_session()
             
+            # Ensure FIFO exists before starting rpicam and pipeline
+            self.ensure_fifo()
+
             # Start rpicam-vid process (returns immediately)
             self.start_rpicam()
             
             # Schedule pipeline creation after rpicam-vid initializes
-            logger.info("Scheduling pipeline creation in 3 seconds...")
-            GLib.timeout_add(6000, self.create_and_start_pipeline)
+            logger.info("Scheduling pipeline creation in 2 seconds...")
+            GLib.timeout_add(2000, self.create_and_start_pipeline)
             
         except Exception as e:
             logger.error(f"Initialization failed: {e}")
@@ -313,12 +363,14 @@ class GStreamerWebRTC:
     def start_rpicam(self):
         """Start rpicam-vid process"""
         import subprocess
-        
-        # Create FIFO if it doesn't exist
-        fifo_path = '/tmp/h264_fifo'
-        if os.path.exists(fifo_path):
-            os.remove(fifo_path)
-        os.mkfifo(fifo_path)
+
+        if self.rpicam_process and self.rpicam_process.poll() is None:
+            return
+
+        # FIFO should already exist; don't remove it here
+        self.ensure_fifo()
+
+        stderr_log = open('/tmp/rpicam-vid.log', 'ab')
         
         # Start rpicam-vid with hardware encoding in background
         self.rpicam_process = subprocess.Popen([
@@ -335,10 +387,8 @@ class GStreamerWebRTC:
             '--timeout', '0',        # Run indefinitely
             '--nopreview',           # No preview
             '--denoise', 'cdn_off',  # Disable denoise for lower latency
-            '-o', fifo_path
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        
-        self.fifo_path = fifo_path
+            '-o', self.fifo_path
+        ], stdout=subprocess.DEVNULL, stderr=stderr_log)
         logger.info(f"Started rpicam-vid: {WIDTH}x{HEIGHT} @ {FRAMERATE}fps, {BITRATE/1000000}Mbps")
     
     def create_and_start_pipeline(self):
@@ -351,10 +401,9 @@ class GStreamerWebRTC:
             self.start_pipeline()
             
             logger.info("Pipeline started successfully!")
-            
-            # Wait longer for rpicam-vid to start streaming before negotiation
-            logger.info("Waiting for camera stream to stabilize (20 seconds)...")
-            GLib.timeout_add(20000, self.trigger_negotiation)
+
+            # Trigger negotiation only after caps are negotiated
+            GLib.timeout_add(500, self.check_rtp_caps_ready)
             
         except Exception as e:
             logger.error(f"Pipeline creation failed: {e}")
