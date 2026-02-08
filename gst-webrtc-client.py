@@ -398,9 +398,19 @@ class GStreamerWebRTC:
         """Log outbound RTP stats from webrtcbin"""
         promise.wait()
         reply = promise.get_reply()
+        if not reply:
+            logger.info("WebRTC stats: empty reply")
+            return
+
         stats = reply.get_value('stats')
         if not stats:
+            logger.info("WebRTC stats: no stats in reply")
             return
+
+        try:
+            logger.info(f"WebRTC stats raw: {stats.to_string()}")
+        except Exception:
+            logger.info("WebRTC stats raw: <unprintable>")
 
         # stats is a GstStructure with nested stats objects
         # Log only outbound-rtp video to avoid noise
