@@ -9,6 +9,8 @@ import aiohttp
 import json
 from fractions import Fraction
 import time
+import subprocess
+import av
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -19,11 +21,84 @@ CLOUDFLARE_APP_ID = os.getenv('CF_REALTIME_APP_ID', 'your-app-id')
 CLOUDFLARE_APP_SECRET = os.getenv('CF_REALTIME_TOKEN', 'your-app-secret')
 CLOUDFLARE_API_BASE = 'https://rtc.live.cloudflare.com/v1'
 
-W=1640
-H=1232
+W=640
+H=480
 
 # Signaling server configuration
 SIGNALING_SERVER = os.getenv('SIGNALING_SERVER', 'https://79-76-127-159.nip.io')
+
+class HardwareEncodedCameraTrack(VideoStreamTrack):
+    """
+    Video track using hardware H.264 encoding via rpicam-vid
+    Much more efficient than software encoding on RPi
+    """
+    def __init__(self):
+        super().__init__()
+        
+        # Start rpicam-vid with hardware encoding, output to stdout
+        self.process = subprocess.Popen([
+            'rpicam-vid',
+            '--width', str(W),
+            '--height', str(H),
+            '--framerate', '30',
+            '--codec', 'h264',
+            '--profile', 'baseline',
+            '--level', '4.0',
+            '--bitrate', '1000000',  # 1 Mbps
+            '--inline',              # Include SPS/PPS in every keyframe
+            '--flush',               # Flush buffers immediately
+            '--timeout', '0',        # Run indefinitely
+            '--nopreview',           # No preview window
+            '-o', '-'                # Output to stdout
+        ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        
+        # Create av container from the H.264 stream
+        self.container = av.open(self.process.stdout, format='h264', mode='r')
+        self.stream = self.container.streams.video[0]
+        
+        logger.info(f"Hardware encoder started: {W}x{H} @ 30fps, H.264 baseline")
+        
+        self.frame_count = 0
+        
+    async def recv(self):
+        """
+        Read next frame from hardware-encoded stream
+        """
+        pts, time_base = await self.next_timestamp()
+        
+        # Read frame from H.264 stream
+        for packet in self.container.demux(self.stream):
+            for frame in packet.decode():
+                self.frame_count += 1
+                
+                # Set proper timing
+                frame.pts = pts
+                frame.time_base = time_base
+                
+                # FPS monitoring
+                if not hasattr(self, 'last_log_time'):
+                    self.last_log_time = time.time()
+                    self.frames_since_log = 0
+                
+                self.frames_since_log += 1
+                current_time = time.time()
+                time_elapsed = current_time - self.last_log_time
+                
+                if time_elapsed >= 5.0:
+                    fps = self.frames_since_log / time_elapsed
+                    logger.info(f"Hardware encoding FPS: {fps:.2f}")
+                    self.last_log_time = current_time
+                    self.frames_since_log = 0
+                
+                return frame
+        
+        # If stream ended, raise StopAsyncIteration
+        raise StopAsyncIteration
+    
+    def __del__(self):
+        if hasattr(self, 'process'):
+            self.process.terminate()
+            self.process.wait()
 
 class PiCameraTrack(VideoStreamTrack):
     """
@@ -270,7 +345,12 @@ async def run_stream():
         
         # Add video track
         logger.info("Initializing camera...")
-        camera_track = PiCameraTrack()
+        # Try hardware encoding first, fallback to software
+        try:
+            camera_track = HardwareEncodedCameraTrack()
+        except Exception as e:
+            logger.warning(f"Hardware encoding failed: {e}, falling back to software encoding")
+            camera_track = PiCameraTrack()
         pc.addTrack(camera_track)
         
         # Create offer
