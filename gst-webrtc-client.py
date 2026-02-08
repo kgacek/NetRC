@@ -37,6 +37,7 @@ class GStreamerWebRTC:
         self.webrtc = None
         self.session_id = None
         self.fifo_path = '/tmp/h264_fifo'
+        self.fifo_keep_fd = None
         self.rpicam_process = None
         self.rpicam_restart_count = 0
         self.fps_count = 0
@@ -265,9 +266,14 @@ class GStreamerWebRTC:
         if os.path.exists(self.fifo_path):
             if not stat.S_ISFIFO(os.stat(self.fifo_path).st_mode):
                 raise RuntimeError(f"{self.fifo_path} exists and is not a FIFO")
-            return
-        os.mkfifo(self.fifo_path)
-        logger.info(f"Created FIFO at {self.fifo_path}")
+        else:
+            os.mkfifo(self.fifo_path)
+            logger.info(f"Created FIFO at {self.fifo_path}")
+
+        # Keep a dummy reader open so rpicam-vid doesn't get SIGPIPE if no reader yet
+        if self.fifo_keep_fd is None:
+            self.fifo_keep_fd = os.open(self.fifo_path, os.O_RDONLY | os.O_NONBLOCK)
+            logger.info("Opened FIFO keep-alive reader")
 
     def check_rtp_caps_ready(self):
         """Wait until rtph264pay has negotiated caps with a concrete payload"""
@@ -398,6 +404,9 @@ class GStreamerWebRTC:
             if hasattr(self, 'rpicam_process'):
                 self.rpicam_process.terminate()
                 self.rpicam_process.wait()
+            if self.fifo_keep_fd is not None:
+                os.close(self.fifo_keep_fd)
+                self.fifo_keep_fd = None
             if hasattr(self, 'fifo_path'):
                 import os
                 if os.path.exists(self.fifo_path):
