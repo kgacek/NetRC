@@ -61,46 +61,9 @@ class GStreamerWebRTC:
     
     def create_pipeline(self):
         """Create GStreamer pipeline reading from rpicam-vid hardware encoder via FIFO"""
-        # Use rpicam-vid with hardware H.264 encoding, output to FIFO
-        # This gives us full control over camera settings and uses hardware encoder
-        
-        import os
-        import subprocess
-        
-        # Create FIFO if it doesn't exist
-        fifo_path = '/tmp/h264_fifo'
-        if os.path.exists(fifo_path):
-            os.remove(fifo_path)
-        os.mkfifo(fifo_path)
-        
-        # Start rpicam-vid with hardware encoding in background
-        self.rpicam_process = subprocess.Popen([
-            'rpicam-vid',
-            '--width', str(WIDTH),
-            '--height', str(HEIGHT),
-            '--framerate', str(FRAMERATE),
-            '--codec', 'h264',
-            '--profile', 'baseline',
-            '--level', '4.0',
-            '--bitrate', str(BITRATE),
-            '--inline',              # SPS/PPS in every keyframe
-            '--flush',               # Low latency
-            '--timeout', '0',        # Run indefinitely
-            '--nopreview',           # No preview
-            '--denoise', 'cdn_off',  # Disable denoise for lower latency
-            '-o', fifo_path
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        
-        logger.info(f"Started rpicam-vid: {WIDTH}x{HEIGHT} @ {FRAMERATE}fps, {BITRATE/1000000}Mbps")
-        
-        # Wait for rpicam-vid to initialize and start writing to FIFO
-        import time
-        logger.info("Waiting 3 seconds for rpicam-vid to initialize...")
-        time.sleep(3)
-        
-        # GStreamer pipeline reads from FIFO
+        # GStreamer pipeline reads from FIFO (rpicam-vid already running)
         pipeline_str = f"""
-        filesrc location={fifo_path} ! 
+        filesrc location={self.fifo_path} ! 
         h264parse config-interval=-1 ! 
         video/x-h264,stream-format=byte-stream,alignment=au,profile=baseline ! 
         rtph264pay config-interval=-1 pt=96 mtu=1200 aggregate-mode=zero-latency ! 
@@ -110,7 +73,6 @@ class GStreamerWebRTC:
         logger.info("Creating GStreamer pipeline (reading from rpicam-vid FIFO)")
         
         self.pipe = Gst.parse_launch(pipeline_str)
-        self.fifo_path = fifo_path
         
         self.webrtc = self.pipe.get_by_name('sendrecv')
         
@@ -289,6 +251,53 @@ class GStreamerWebRTC:
             # Create Cloudflare session
             self.create_cloudflare_session()
             
+            # Start rpicam-vid process (returns immediately)
+            self.start_rpicam()
+            
+            # Schedule pipeline creation after rpicam-vid initializes
+            logger.info("Scheduling pipeline creation in 3 seconds...")
+            GLib.timeout_add(3000, self.create_and_start_pipeline)
+            
+        except Exception as e:
+            logger.error(f"Initialization failed: {e}")
+            self.main_loop.quit()
+        
+        return False  # Don't repeat idle callback
+    
+    def start_rpicam(self):
+        """Start rpicam-vid process"""
+        import subprocess
+        
+        # Create FIFO if it doesn't exist
+        fifo_path = '/tmp/h264_fifo'
+        if os.path.exists(fifo_path):
+            os.remove(fifo_path)
+        os.mkfifo(fifo_path)
+        
+        # Start rpicam-vid with hardware encoding in background
+        self.rpicam_process = subprocess.Popen([
+            'rpicam-vid',
+            '--width', str(WIDTH),
+            '--height', str(HEIGHT),
+            '--framerate', str(FRAMERATE),
+            '--codec', 'h264',
+            '--profile', 'baseline',
+            '--level', '4.0',
+            '--bitrate', str(BITRATE),
+            '--inline',              # SPS/PPS in every keyframe
+            '--flush',               # Low latency
+            '--timeout', '0',        # Run indefinitely
+            '--nopreview',           # No preview
+            '--denoise', 'cdn_off',  # Disable denoise for lower latency
+            '-o', fifo_path
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+        self.fifo_path = fifo_path
+        logger.info(f"Started rpicam-vid: {WIDTH}x{HEIGHT} @ {FRAMERATE}fps, {BITRATE/1000000}Mbps")
+    
+    def create_and_start_pipeline(self):
+        """Create and start GStreamer pipeline (called after rpicam-vid delay)"""
+        try:
             # Create pipeline
             self.create_pipeline()
             
@@ -302,10 +311,10 @@ class GStreamerWebRTC:
             GLib.timeout_add(2000, self.trigger_negotiation)
             
         except Exception as e:
-            logger.error(f"Initialization failed: {e}")
+            logger.error(f"Pipeline creation failed: {e}")
             self.main_loop.quit()
         
-        return False  # Don't repeat idle callback
+        return False  # Don't repeat
 
 def main():
     if not CLOUDFLARE_APP_ID or not CLOUDFLARE_APP_SECRET:
