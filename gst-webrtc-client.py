@@ -352,7 +352,8 @@ class GStreamerWebRTC:
             # Create Cloudflare session
             self.create_cloudflare_session()
             
-            # Create and start pipeline (will start rpicam internally)\n            self.create_and_start_pipeline()
+            # Create and start pipeline (will start rpicam internally)
+            self.create_and_start_pipeline()
             
         except Exception as e:
             logger.error(f"Initialization failed: {e}")
