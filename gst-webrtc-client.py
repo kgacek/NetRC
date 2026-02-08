@@ -79,13 +79,6 @@ class GStreamerWebRTC:
         
         self.webrtc = self.pipe.get_by_name('sendrecv')
         
-        # Add video transceiver explicitly (required for SDP generation)
-        # This ensures webrtcbin creates proper offer even before data flows
-        direction = GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY
-        caps = Gst.Caps.from_string("application/x-rtp,media=video,encoding-name=H264,payload=96")
-        self.webrtc.emit('add-transceiver', direction, caps)
-        logger.info("Added video transceiver (H264, sendonly)")
-        
         # Connect signals
         self.webrtc.connect('on-negotiation-needed', self.on_negotiation_needed)
         self.webrtc.connect('on-ice-candidate', self.on_ice_candidate)
@@ -96,6 +89,26 @@ class GStreamerWebRTC:
         
     def on_negotiation_needed(self, element):
         """Handle negotiation needed"""
+        # Debug: check pipeline pads
+        filesrc = self.pipe.get_by_name('filesrc0')
+        if filesrc:
+            src_pad = filesrc.get_static_pad('src')
+            logger.info(f"filesrc src pad: {src_pad}, is-linked: {src_pad.is_linked() if src_pad else 'N/A'}")
+        
+        # Check webrtcbin sink pads
+        iterator = element.iterate_sink_pads()
+        pads = []
+        while True:
+            result, pad = iterator.next()
+            if result != Gst.IteratorResult.OK:
+                break
+            pads.append(pad.get_name())
+        logger.info(f"webrtcbin sink pads: {pads}")
+        
+        # Debug: check transceivers
+        n_transceivers = element.emit('get-transceivers')
+        logger.info(f"Number of transceivers: {len(n_transceivers) if n_transceivers else 0}")
+        
         logger.info("Negotiation needed, creating offer...")
         promise = Gst.Promise.new_with_change_func(self.on_offer_created, element, None)
         element.emit('create-offer', None, promise)
