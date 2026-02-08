@@ -108,6 +108,9 @@ class GStreamerWebRTC:
         
     def on_negotiation_needed(self, element):
         """Handle negotiation needed"""
+        if not self.rtp_caps_ready():
+            logger.info("Negotiation needed but RTP caps not ready yet.")
+            return
         if self.negotiation_started:
             logger.info("Negotiation already started, ignoring.")
             return
@@ -271,24 +274,28 @@ class GStreamerWebRTC:
             logger.warning(f"rpicam-vid exited, restarting (attempt {self.rpicam_restart_count})")
             self.start_rpicam()
 
-        pay = self.pipe.get_by_name('rtph264pay0')
-        if not pay:
-            logger.debug("Waiting for rtph264pay element...")
-            return True
-
-        src_pad = pay.get_static_pad('src')
-        caps = src_pad.get_current_caps() if src_pad else None
-        if caps:
-            caps_str = caps.to_string()
-            if "payload=(int)96" in caps_str:
-                logger.info("RTP caps negotiated (payload=96), triggering negotiation...")
-                GLib.timeout_add(100, self.trigger_negotiation)
-                return False
+        if self.rtp_caps_ready():
+            logger.info("RTP caps negotiated (payload=96), triggering negotiation...")
+            GLib.timeout_add(100, self.trigger_negotiation)
+            return False
 
         if self.rtp_caps_check_count % 5 == 0:
             logger.info("Waiting for RTP caps negotiation...")
 
         return True
+
+    def rtp_caps_ready(self):
+        """Return True when rtph264pay has negotiated payload=96"""
+        pay = self.pipe.get_by_name('rtph264pay0')
+        if not pay:
+            return False
+
+        src_pad = pay.get_static_pad('src')
+        caps = src_pad.get_current_caps() if src_pad else None
+        if not caps:
+            return False
+
+        return "payload=(int)96" in caps.to_string()
     
     def trigger_negotiation(self):
         """Trigger WebRTC negotiation"""
