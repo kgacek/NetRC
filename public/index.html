@@ -146,6 +146,7 @@
         let statsInterval = null;
         let lastFramesDecoded = null;
         let lastStatsTs = null;
+        let renderStatsInterval = null;
 
         function updateStatus(message, type = 'info') {
             const statusEl = document.getElementById('status');
@@ -210,6 +211,35 @@
 
                 updateStats(`Stats: fps=${fps}, jitter=${jitter}s, jb=${jitterBufferMs}ms, lost=${packetsLost}, recv=${packetsReceived}, dropped=${framesDropped}`);
             }, 1000);
+        }
+
+        function startRenderStats() {
+            const video = document.getElementById('remoteVideo');
+            if (renderStatsInterval) clearInterval(renderStatsInterval);
+
+            renderStatsInterval = setInterval(() => {
+                if (!video) return;
+                if (typeof video.getVideoPlaybackQuality === 'function') {
+                    const q = video.getVideoPlaybackQuality();
+                    updateStats(`Stats: fps=${document.getElementById('stats').textContent.split('fps=')[1]?.split(',')[0] || 'n/a'}, ` +
+                                `jitter=${document.getElementById('stats').textContent.split('jitter=')[1]?.split(',')[0] || 'n/a'}, ` +
+                                `jb=${document.getElementById('stats').textContent.split('jb=')[1]?.split(',')[0] || 'n/a'}, ` +
+                                `lost=${document.getElementById('stats').textContent.split('lost=')[1]?.split(',')[0] || 'n/a'}, ` +
+                                `recv=${document.getElementById('stats').textContent.split('recv=')[1]?.split(',')[0] || 'n/a'}, ` +
+                                `dropped=${document.getElementById('stats').textContent.split('dropped=')[1] || 'n/a'}, ` +
+                                `renderDropped=${q.droppedVideoFrames}, total=${q.totalVideoFrames}`);
+                }
+            }, 1000);
+
+            video.onwaiting = () => {
+                updateStatus('Buffering (video waiting)...', 'error');
+            };
+            video.onplaying = () => {
+                updateStatus('Playing', 'success');
+            };
+            video.onstalled = () => {
+                updateStatus('Video stalled', 'error');
+            };
         }
 
         async function loadSessions() {
@@ -323,6 +353,7 @@
                         video.play().catch(e => console.error('Play error:', e));
                     }
                     startStats();
+                    startRenderStats();
                 };
 
                 peerConnection.onconnectionstatechange = () => {
@@ -430,6 +461,10 @@
             if (statsInterval) {
                 clearInterval(statsInterval);
                 statsInterval = null;
+            }
+            if (renderStatsInterval) {
+                clearInterval(renderStatsInterval);
+                renderStatsInterval = null;
             }
             updateStats('Stats: n/a');
             
