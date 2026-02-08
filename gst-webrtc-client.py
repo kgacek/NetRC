@@ -113,7 +113,7 @@ class GStreamerWebRTC:
         # Connect signals
         self.webrtc.connect('on-negotiation-needed', self.on_negotiation_needed)
         self.webrtc.connect('on-ice-candidate', self.on_ice_candidate)
-        self.webrtc.connect('on-ice-gathering-state-notify', self.on_ice_gathering_state)
+        self.webrtc.connect('notify::ice-gathering-state', self.on_ice_gathering_state)
         
         # Add data channel for stats
         self.webrtc.emit('create-data-channel', 'stats', None)
