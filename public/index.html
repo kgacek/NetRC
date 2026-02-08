@@ -370,7 +370,15 @@
                 };
 
                 // Add transceiver to receive video
-                peerConnection.addTransceiver('video', { direction: 'recvonly' });
+                const videoTransceiver = peerConnection.addTransceiver('video', { direction: 'recvonly' });
+                if (videoTransceiver && videoTransceiver.receiver) {
+                    // Add a small playout delay to smooth jitter (if supported by browser)
+                    try {
+                        videoTransceiver.receiver.playoutDelayHint = 0.2;
+                    } catch (e) {
+                        console.warn('playoutDelayHint not supported', e);
+                    }
+                }
 
                 // Create offer
                 const offer = await peerConnection.createOffer();
