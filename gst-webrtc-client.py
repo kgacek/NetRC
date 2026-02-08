@@ -73,11 +73,12 @@ class GStreamerWebRTC:
         """Create GStreamer pipeline reading from rpicam-vid hardware encoder via FIFO"""
         # GStreamer pipeline reads from FIFO (rpicam-vid already running)
         pipeline_str = f"""
-        filesrc location={self.fifo_path} is-live=true do-timestamp=true !
+        filesrc location={self.fifo_path} !
+        identity do-timestamp=true !
         queue leaky=downstream max-size-time=1000000000 !
         h264parse !
         video/x-h264,stream-format=avc,alignment=au,profile=baseline !
-        rtph264pay pt=96 config-interval=1 mtu=1200 !
+        rtph264pay pt=96 mtu=1200 config-interval=1 !
         application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000 !
         webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.cloudflare.com:3478
         """
