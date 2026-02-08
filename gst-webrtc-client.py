@@ -88,12 +88,16 @@ class GStreamerWebRTC:
         self.pipe.add(rtph264pay)
         self.pipe.add(self.webrtc)
         
-        # Link elements
+        # Link elements (webrtcbin needs request pad)
         filesrc.link(h264parse)
         h264parse.link(rtph264pay)
-        rtph264pay.link(self.webrtc)
         
-        logger.info("Pipeline elements created and linked")
+        # Get request pad from webrtcbin
+        webrtc_sink_pad = self.webrtc.get_request_pad("sink_%u")
+        pay_src_pad = rtph264pay.get_static_pad("src")
+        pay_src_pad.link(webrtc_sink_pad)
+        
+        logger.info(f"Pipeline elements created and linked (webrtc pad: {webrtc_sink_pad.get_name()})")
         
         # Connect signals
         self.webrtc.connect('on-negotiation-needed', self.on_negotiation_needed)
