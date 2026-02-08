@@ -133,13 +133,14 @@ class GStreamerWebRTC:
         
         # Send offer to Cloudflare
         sdp = offer.sdp.as_text()
-        asyncio.run_coroutine_threadsafe(
-            self.send_offer_to_cloudflare(sdp),
-            self.loop
-        )
+        # Run in a thread to not block GLib loop
+        import threading
+        threading.Thread(target=self.send_offer_to_cloudflare, args=(sdp,), daemon=True).start()
     
-    async def send_offer_to_cloudflare(self, offer_sdp):
-        """Send offer to Cloudflare Calls API"""
+    def send_offer_to_cloudflare(self, offer_sdp):
+        """Send offer to Cloudflare Calls API (synchronous)"""
+        import requests
+        
         logger.info("Sending offer to Cloudflare...")
         
         # Extract video mid
@@ -179,19 +180,20 @@ class GStreamerWebRTC:
             ]
         }
         
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json=payload) as response:
-                if response.status != 200:
-                    text = await response.text()
-                    logger.error(f"Failed to send offer: {response.status} - {text}")
-                    return
-                
-                data = await response.json()
-                logger.info("Received answer from Cloudflare")
-                
-                # Set remote description
-                answer_sdp = data['sessionDescription']['sdp']
-                self.set_remote_description(answer_sdp)
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=10)
+            if response.status_code != 200:
+                logger.error(f"Failed to send offer: {response.status_code} - {response.text}")
+                return
+            
+            data = response.json()
+            logger.info("Received answer from Cloudflare")
+            
+            # Set remote description
+            answer_sdp = data['sessionDescription']['sdp']
+            self.set_remote_description(answer_sdp)
+        except Exception as e:
+            logger.error(f"Error sending offer: {e}")
     
     def set_remote_description(self, answer_sdp):
         """Set remote description from Cloudflare answer"""
@@ -220,9 +222,6 @@ class GStreamerWebRTC:
         if ret == Gst.StateChangeReturn.FAILURE:
             logger.error("Failed to start pipeline")
             sys.exit(1)
-        
-        # Manually trigger negotiation after pipeline starts
-        GLib.timeout_add_seconds(2, self.trigger_negotiation)
         
         # Monitor pipeline stats
         GLib.timeout_add_seconds(5, self.print_stats)
@@ -254,21 +253,25 @@ class GStreamerWebRTC:
     
     async def run(self):
         """Main run loop"""
-        self.loop = asyncio.get_event_loop()
-        
         # Create Cloudflare session
         await self.create_cloudflare_session()
         
-        # Create and start pipeline
+        # Create pipeline
         self.create_pipeline()
+        
+        # Start pipeline in playing state
         self.start_pipeline()
         
-        # Run GLib main loop
+        # Schedule negotiation after pipeline is ready
+        GLib.timeout_add(2000, self.trigger_negotiation)  # 2 seconds delay
+        
+        # Run GLib main loop in a thread
         logger.info("Streaming started! Press Ctrl+C to stop.")
-        main_loop = GLib.MainLoop()
+        self.main_loop = GLib.MainLoop()
         
         try:
-            main_loop.run()
+            # Run main loop
+            self.main_loop.run()
         except KeyboardInterrupt:
             logger.info("Stopping...")
         finally:
