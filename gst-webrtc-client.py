@@ -79,6 +79,13 @@ class GStreamerWebRTC:
         
         self.webrtc = self.pipe.get_by_name('sendrecv')
         
+        # Add video transceiver explicitly (required for SDP generation)
+        # This ensures webrtcbin creates proper offer even before data flows
+        direction = GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY
+        caps = Gst.Caps.from_string("application/x-rtp,media=video,encoding-name=H264,payload=96")
+        self.webrtc.emit('add-transceiver', direction, caps)
+        logger.info("Added video transceiver (H264, sendonly)")
+        
         # Connect signals
         self.webrtc.connect('on-negotiation-needed', self.on_negotiation_needed)
         self.webrtc.connect('on-ice-candidate', self.on_ice_candidate)
@@ -105,25 +112,10 @@ class GStreamerWebRTC:
         
         # With Cloudflare ice-lite, send offer immediately without waiting for ICE gathering
         # Server will provide ICE candidates in the answer
-        sdp = offer.sdp.as_text()
-        
-        # Validate SDP has media section before sending
-        if 'm=video' not in sdp or 'a=ice-ufrag' not in sdp:
-            logger.warning("SDP incomplete (no media or ICE), waiting 1s and retrying...")
-            GLib.timeout_add(1000, self.retry_negotiation)
-            return
-        
         logger.info("Sending offer to Cloudflare (ice-lite mode)...")
+        sdp = offer.sdp.as_text()
         import threading
         threading.Thread(target=self.send_offer_to_cloudflare, args=(sdp,), daemon=True).start()
-    
-    def retry_negotiation(self):
-        """Retry negotiation after pipeline has data"""
-        logger.info("Retrying negotiation...")
-        if self.webrtc:
-            self.webrtc.emit('create-offer', None, 
-                Gst.Promise.new_with_change_func(self.on_offer_created, self.webrtc, None))
-        return False
     
     def on_ice_candidate(self, element, mlineindex, candidate):
         """Handle ICE candidate - not needed with ice-lite server"""
