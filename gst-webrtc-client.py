@@ -91,7 +91,7 @@ class GStreamerWebRTC:
         """Handle offer created"""
         promise.wait()
         reply = promise.get_reply()
-        offer = reply['offer']
+        offer = reply.get_value('offer')
         
         promise = Gst.Promise.new()
         element.emit('set-local-description', offer, promise)
