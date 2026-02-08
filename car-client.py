@@ -19,8 +19,8 @@ CLOUDFLARE_APP_ID = os.getenv('CF_REALTIME_APP_ID', 'your-app-id')
 CLOUDFLARE_APP_SECRET = os.getenv('CF_REALTIME_TOKEN', 'your-app-secret')
 CLOUDFLARE_API_BASE = 'https://rtc.live.cloudflare.com/v1'
 
-W=640
-H=480
+W=1920
+H=1080
 
 # Signaling server configuration
 SIGNALING_SERVER = os.getenv('SIGNALING_SERVER', 'https://79-76-127-159.nip.io')
@@ -39,7 +39,8 @@ class PiCameraTrack(VideoStreamTrack):
             # Configure camera for low latency streaming
             config = self.camera.create_video_configuration(
                 main={"size": (W, H), "format": "BGR888"},
-                buffer_count=2
+                buffer_count=2,
+                controls={"FrameRate": 30}
             )
             self.camera.configure(config)
             self.camera.start()
