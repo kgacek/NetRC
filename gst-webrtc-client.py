@@ -98,7 +98,7 @@ class GStreamerWebRTC:
         
         promise = Gst.Promise.new()
         element.emit('set-local-description', offer, promise)
-        promise.interrupt()
+        promise.wait()  # Wait for local description to be set
         
         # With Cloudflare ice-lite, send offer immediately
         # Server will provide ICE candidates in the answer
