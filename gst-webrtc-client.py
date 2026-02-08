@@ -44,6 +44,7 @@ class GStreamerWebRTC:
         self.fps_last_time = time.monotonic()
         self.last_buffer_time = None
         self.max_gap_ms = 0.0
+        self.bytes_count = 0
         
     def create_cloudflare_session(self):
         """Create new Cloudflare session"""
@@ -319,6 +320,9 @@ class GStreamerWebRTC:
         """Count RTP buffers to estimate FPS"""
         if info.type & Gst.PadProbeType.BUFFER:
             self.fps_count += 1
+            buf = info.get_buffer()
+            if buf:
+                self.bytes_count += buf.get_size()
             now = time.monotonic()
             if self.last_buffer_time is not None:
                 gap_ms = (now - self.last_buffer_time) * 1000.0
@@ -333,8 +337,10 @@ class GStreamerWebRTC:
         elapsed = now - self.fps_last_time
         if elapsed > 0:
             fps = self.fps_count / elapsed
-            logger.info(f"Measured RTP FPS: {fps:.1f}")
+            bitrate_kbps = (self.bytes_count * 8) / (elapsed * 1000.0)
+            logger.info(f"Measured RTP FPS: {fps:.1f}, bitrate: {bitrate_kbps:.0f} kbps")
         self.fps_count = 0
+        self.bytes_count = 0
         self.fps_last_time = now
         return True
 
