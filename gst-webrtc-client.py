@@ -7,7 +7,8 @@ import gi
 gi.require_version('Gst', '1.0')
 gi.require_version('GstWebRTC', '1.0')
 gi.require_version('GstSdp', '1.0')
-from gi.repository import Gst, GstWebRTC, GstSdp, GLib
+gi.require_version('GstRtp', '1.0')
+from gi.repository import Gst, GstWebRTC, GstSdp, GstRtp, GLib
 import json
 import os
 import sys
@@ -75,7 +76,7 @@ class GStreamerWebRTC:
         # otwierasz FIFO do czytania w trybie binarnym (blokujące)
         pipeline_str = f"""
         filesrc location={self.fifo_path} do-timestamp=true !
-        queue leaky=downstream max-size-time=100000000 max-size-bytes=0 max-size-buffers=0 !
+        queue leaky=downstream max-size-time=30000000 max-size-bytes=0 max-size-buffers=1 !
         h264parse !
         video/x-h264,stream-format=avc,alignment=au,profile=baseline !
         rtph264pay pt=96 mtu=1200 config-interval=1 aggregate-mode=zero-latency !
@@ -311,9 +312,18 @@ class GStreamerWebRTC:
         GLib.timeout_add_seconds(1, self.report_fps)
 
     def on_pay_buffer(self, pad, info):
-        """Count RTP buffers to estimate FPS"""
+        """Count RTP frames using marker bit to estimate FPS"""
         if info.type & Gst.PadProbeType.BUFFER:
-            self.fps_count += 1
+            buffer = info.get_buffer()
+            if buffer is None:
+                return Gst.PadProbeReturn.OK
+            ok, rtp = GstRtp.RTPBuffer.map(buffer, Gst.MapFlags.READ)
+            if ok:
+                try:
+                    if rtp.get_marker():
+                        self.fps_count += 1
+                finally:
+                    rtp.unmap()
         return Gst.PadProbeReturn.OK
 
     def report_fps(self):
