@@ -223,6 +223,9 @@ async def run_control_subscriber(car_controller, control_session_id):
         
         logger.info(f"Subscribing to control DataChannel from session {control_session_id}")
         
+        # Wait a bit for transport to be fully ready
+        await asyncio.sleep(1)
+        
         async with aiohttp.ClientSession() as session:
             async with session.post(dc_new_url, headers=headers, json=dc_new_payload) as response:
                 response_text = await response.text()
@@ -235,16 +238,21 @@ async def run_control_subscriber(car_controller, control_session_id):
                     dc_id = data['dataChannels'][0]['id']
                     logger.info(f"Creating negotiated DataChannel with ID: {dc_id}")
                     
+                    # Wait a bit before creating DataChannel to ensure transport is ready
+                    await asyncio.sleep(1)
+                    
                     # Create negotiated DataChannel - this will trigger ondatachannel when connected
                     control_dc = pc_control.createDataChannel('control-subscribed', negotiated=True, id=dc_id)
+                    logger.info(f"DataChannel object created: {control_dc}")
+                    logger.info(f"DataChannel readyState: {control_dc.readyState}")
                     
                     @control_dc.on('open')
                     def on_open():
-                        logger.info(f"Control DataChannel opened!")
+                        logger.info(f"✓ Control DataChannel OPENED!")
                     
                     @control_dc.on('message')
                     def on_message(message):
-                        # Don't log every message - only errors
+                        logger.info(f"✓ Control DataChannel message received: {message[:50]}")
                         if car_controller:
                             car_controller.process_control_message(message)
                     
@@ -256,16 +264,24 @@ async def run_control_subscriber(car_controller, control_session_id):
                     
                     @control_dc.on('error')
                     def on_error(error):
-                        logger.error(f"Control DataChannel error: {error}")
+                        logger.error(f"✗ Control DataChannel error: {error}")
                     
                     # Monitor connection state
                     @pc_control.on('connectionstatechange')
                     async def on_connectionstatechange():
-                        logger.info(f"Control connection state: {pc_control.connectionState}")
+                        logger.info(f"Control PC connectionState: {pc_control.connectionState}")
                         if pc_control.connectionState in ['failed', 'closed']:
                             logger.warning("Control connection failed or closed")
                             if car_controller:
                                 car_controller.send_command(0, 0)
+                    
+                    @pc_control.on('iceconnectionstatechange')
+                    async def on_iceconnectionstatechange():
+                        logger.info(f"Control PC iceConnectionState: {pc_control.iceConnectionState}")
+                    
+                    # Wait a bit to see if DataChannel opens
+                    await asyncio.sleep(2)
+                    logger.info(f"After 2s, DataChannel readyState: {control_dc.readyState}")
                     
                     logger.info(f"Control DataChannel subscribed successfully")
                 else:
