@@ -17,7 +17,6 @@ import logging
 import stat
 import time
 import threading
-import struct
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -34,6 +33,12 @@ HEIGHT = 720
 FRAMERATE = 25
 BITRATE = 5000000  # 5 Mbps for 720p
 
+# Low-latency tuning
+QUEUE_MAX_TIME_NS = 50_000_000  # 50 ms
+QUEUE_MAX_BUFFERS = 0
+APPsrc_HIGH_WATERMARK = 256 * 1024  # bytes
+APPsrc_LOW_WATERMARK = 128 * 1024   # bytes
+
 class GStreamerWebRTC:
     def __init__(self):
         Gst.init(None)
@@ -49,8 +54,13 @@ class GStreamerWebRTC:
         self.reader_thread = None
         self.reader_stop = threading.Event()
         self.drop_until_idr = False
-        self.appsrc_max_bytes = 512 * 1024
-        self.sei_uuid = bytes.fromhex("00112233445566778899aabbccddeeff")
+        self.appsrc_max_bytes = APPsrc_HIGH_WATERMARK
+        self.drop_high_watermark = APPsrc_HIGH_WATERMARK
+        self.drop_low_watermark = APPsrc_LOW_WATERMARK
+        self.cached_sps = None
+        self.cached_pps = None
+        self.sps_pps_needed = False
+        self.drop_count = 0
         
     def create_cloudflare_session(self):
         """Create new Cloudflare session"""
@@ -86,7 +96,7 @@ class GStreamerWebRTC:
         pipeline_str = f"""
         appsrc name=src is-live=true do-timestamp=true format=time block=false
             caps=video/x-h264,stream-format=byte-stream,alignment=nal !
-        queue leaky=downstream max-size-time=100000000 max-size-bytes=0 max-size-buffers=0 !
+        queue leaky=downstream max-size-time={QUEUE_MAX_TIME_NS} max-size-bytes=0 max-size-buffers={QUEUE_MAX_BUFFERS} !
         h264parse !
         video/x-h264,stream-format=avc,alignment=au,profile=baseline !
         rtph264pay pt=96 mtu=1200 config-interval=1 aggregate-mode=zero-latency !
@@ -557,23 +567,31 @@ class GStreamerWebRTC:
 
         nal_type = nal[sc_len] & 0x1F
 
-        # Inject SEI timestamp before each IDR frame
-        if nal_type == 5:
-            sei = self._build_sei_timestamp()
-            if sei:
-                sei_buf = Gst.Buffer.new_allocate(None, len(sei), None)
-                sei_buf.fill(0, sei)
-                self.appsrc.emit('push-buffer', sei_buf)
+        if nal_type == 7:
+            self.cached_sps = nal
+        elif nal_type == 8:
+            self.cached_pps = nal
 
         # Drop strategy when appsrc is backlogged: skip non-IDR slices until next IDR
-        if self.appsrc.get_property('current-level-bytes') > self.appsrc_max_bytes:
+        level_bytes = self.appsrc.get_property('current-level-bytes')
+        if level_bytes > self.drop_high_watermark:
             self.drop_until_idr = True
+            self.sps_pps_needed = True
 
         if self.drop_until_idr:
             if nal_type not in (5, 7, 8):
+                self.drop_count += 1
                 return
             if nal_type == 5:
+                if self.sps_pps_needed:
+                    self._push_cached_parameter_sets()
                 self.drop_until_idr = False
+                self.sps_pps_needed = False
+
+        # If backlog is still above low watermark, drop non-IDR slices aggressively
+        if level_bytes > self.drop_low_watermark and nal_type in (1, 2, 3, 4):
+            self.drop_count += 1
+            return
 
         buf = Gst.Buffer.new_allocate(None, len(nal), None)
         buf.fill(0, nal)
@@ -581,54 +599,16 @@ class GStreamerWebRTC:
         if ret != Gst.FlowReturn.OK:
             logger.debug(f"appsrc push-buffer returned {ret}")
 
-    def _build_sei_timestamp(self):
-        """Build SEI user_data_unregistered NAL with wallclock ms timestamp"""
-        ts_ms = int(time.time() * 1000)
-        payload_text = f"ts_ms={ts_ms}".encode('ascii')
-        payload = self.sei_uuid + payload_text
-
-        sei_payload_type = 5  # user_data_unregistered
-        sei_payload_size = len(payload)
-
-        rbsp = bytearray()
-
-        # payload type
-        while sei_payload_type >= 0xFF:
-            rbsp.append(0xFF)
-            sei_payload_type -= 0xFF
-        rbsp.append(sei_payload_type)
-
-        # payload size
-        size = sei_payload_size
-        while size >= 0xFF:
-            rbsp.append(0xFF)
-            size -= 0xFF
-        rbsp.append(size)
-
-        rbsp.extend(payload)
-
-        # rbsp_trailing_bits
-        rbsp.append(0x80)
-
-        rbsp = self._add_emulation_prevention(rbsp)
-
-        # start code + nal header (type 6)
-        return b"\x00\x00\x00\x01" + bytes([0x06]) + rbsp
-
-    def _add_emulation_prevention(self, rbsp):
-        """Insert emulation prevention bytes into RBSP"""
-        out = bytearray()
-        zeros = 0
-        for b in rbsp:
-            if zeros == 2 and b <= 0x03:
-                out.append(0x03)
-                zeros = 0
-            out.append(b)
-            if b == 0x00:
-                zeros += 1
-            else:
-                zeros = 0
-        return out
+    def _push_cached_parameter_sets(self):
+        """Push cached SPS/PPS before IDR if available"""
+        if self.cached_sps:
+            buf = Gst.Buffer.new_allocate(None, len(self.cached_sps), None)
+            buf.fill(0, self.cached_sps)
+            self.appsrc.emit('push-buffer', buf)
+        if self.cached_pps:
+            buf = Gst.Buffer.new_allocate(None, len(self.cached_pps), None)
+            buf.fill(0, self.cached_pps)
+            self.appsrc.emit('push-buffer', buf)
 
 def main():
     if not CLOUDFLARE_APP_ID or not CLOUDFLARE_APP_SECRET:
