@@ -26,10 +26,10 @@ CLOUDFLARE_API_BASE = 'https://rtc.live.cloudflare.com/v1'
 SIGNALING_SERVER = os.getenv('SIGNALING_SERVER', 'https://79-76-127-159.nip.io')
 
 # Video configuration
-WIDTH = 1280
-HEIGHT = 720
+WIDTH = 640
+HEIGHT = 480
 FRAMERATE = 25
-BITRATE = 5000000  # 5 Mbps for 720p
+BITRATE = 2000000  # 2 Mbps for 480p
 INTRA = max(1, FRAMERATE // 2)  # Keyframe interval in frames (0.5s by default)
 
 class GStreamerWebRTC:
@@ -77,7 +77,7 @@ class GStreamerWebRTC:
         # otwierasz FIFO do czytania w trybie binarnym (blokujące)
         pipeline_str = f"""
         filesrc location={self.fifo_path} do-timestamp=true !
-        queue leaky=downstream max-size-time=50000000 max-size-bytes=0 max-size-buffers=1 !
+        queue leaky=downstream max-size-time=30000000 max-size-bytes=0 max-size-buffers=1 !
         h264parse !
         video/x-h264,stream-format=avc,alignment=au,profile=baseline !
         rtph264pay pt=96 mtu=1200 config-interval=1 aggregate-mode=zero-latency !
