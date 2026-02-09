@@ -30,7 +30,7 @@ WIDTH = 640
 HEIGHT = 480
 FRAMERATE = 25
 BITRATE = 2000000  # 2 Mbps for 480p
-INTRA = max(1, FRAMERATE // 2)  # Keyframe interval in frames (0.5s by default)
+INTRA = max(1, FRAMERATE)  # Keyframe interval in frames (0.5s by default)
 
 class GStreamerWebRTC:
     def __init__(self):
