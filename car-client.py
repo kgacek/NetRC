@@ -9,8 +9,8 @@ import aiohttp
 import json
 from fractions import Fraction
 import time
-import subprocess
-import av
+import serial
+import serial.tools.list_ports
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -27,6 +27,10 @@ H=480
 # Signaling server configuration
 SIGNALING_SERVER = os.getenv('SIGNALING_SERVER', 'https://79-76-127-159.nip.io')
 
+# UART configuration for car control
+UART_DEV = os.getenv('UART_DEV', '/dev/ttyS0')
+UART_BAUD = int(os.getenv('UART_BAUD', '115200'))
+
 class PiCameraTrack(VideoStreamTrack):
     """
     Video track from Raspberry Pi Camera using picamera2
@@ -40,16 +44,9 @@ class PiCameraTrack(VideoStreamTrack):
             
             # Configure camera for low latency streaming
             config = self.camera.create_video_configuration(
-                main={"size": (W, H), "format": "YUV420"},
-                buffer_count=2,
-                controls={"FrameRate": 30}
+                main={"size": (W, H), "format": "BGR888"},
+                buffer_count=2
             )
-            self.camera.set_controls({
-                "FrameRate": 30,
-                "AeEnable": False,
-                "ExposureTime": 5000,   # 5 ms
-                "AnalogueGain": 4.0
-            })
             self.camera.configure(config)
             self.camera.start()
             
@@ -65,30 +62,15 @@ class PiCameraTrack(VideoStreamTrack):
         """
         Generate video frames
         """
-        recv_start = time.time()
         pts, time_base = await self.next_timestamp()
         
         if self.camera:
-            # Track recv() call timing
-            current_time = time.time()
-            if not hasattr(self, 'last_recv_time'):
-                self.last_recv_time = current_time
-                self.recv_intervals = []
-            
-            recv_interval = current_time - self.last_recv_time
-            self.recv_intervals.append(recv_interval)
-            self.last_recv_time = current_time
-            
             # Capture frame from Pi Camera
-            capture_start = time.time()
             frame_array = self.camera.capture_array()
-            capture_time = time.time() - capture_start
-            
-            create_start = time.time()
-            frame = VideoFrame.from_ndarray(frame_array, format="yuv420p")
-            create_time = time.time() - create_start
+            frame = VideoFrame.from_ndarray(frame_array, format="rgb24")
             
             # FPS monitoring using actual wall clock time
+            current_time = time.time()
             if not hasattr(self, 'last_log_time'):
                 self.last_log_time = current_time
                 self.frames_since_log = 0
@@ -98,25 +80,15 @@ class PiCameraTrack(VideoStreamTrack):
             
             if time_elapsed >= 5.0:  # Log every 5 seconds
                 actual_fps = self.frames_since_log / time_elapsed
-                
-                # Calculate average recv() interval
-                if len(self.recv_intervals) > 10:
-                    avg_interval = sum(self.recv_intervals[-30:]) / min(30, len(self.recv_intervals))
-                    interval_fps = 1.0 / avg_interval if avg_interval > 0 else 0
-                    logger.info(f"recv() called at {interval_fps:.2f} FPS | Actual FPS: {actual_fps:.2f}")
-                    logger.info(f"Timing - Capture: {capture_time*1000:.1f}ms | Create: {create_time*1000:.1f}ms | Interval: {avg_interval*1000:.1f}ms")
-                else:
-                    logger.info(f"Actual streaming FPS: {actual_fps:.2f}")
-                    
+                logger.info(f"Actual streaming FPS: {actual_fps:.2f}")
                 self.last_log_time = current_time
                 self.frames_since_log = 0
-                self.recv_intervals = []
         else:
             # Simple test pattern fallback
             import numpy as np
             frame = VideoFrame.from_ndarray(
-                np.full((H, W, 2), self.counter % 256, dtype=np.uint8),
-                format="yuv420p"
+                np.full((H, W, 3), self.counter % 256, dtype=np.uint8),
+                format="rgb24"
             )
             self.counter += 1
             
@@ -243,15 +215,270 @@ async def register_session(session_id):
     except Exception as e:
         logger.warning(f"Could not connect to signaling server: {e}")
 
+
+class CarController:
+    """
+    Controls the RC car via UART based on commands from DataChannel
+    """
+    def __init__(self, uart_dev=UART_DEV, uart_baud=UART_BAUD):
+        self.uart_dev = uart_dev
+        self.uart_baud = uart_baud
+        self.ser = None
+        self.seq = 0
+        self.command_queue = asyncio.Queue(maxsize=5)  # Drop old commands if queue full
+        self.running = False
+        
+    def init_uart(self):
+        """Initialize UART connection"""
+        try:
+            self.ser = serial.Serial(self.uart_dev, self.uart_baud, timeout=0.1)
+            logger.info(f"UART initialized: {self.uart_dev} @ {self.uart_baud}")
+            time.sleep(0.2)
+            self.ser.reset_input_buffer()
+            self.ser.reset_output_buffer()
+            return True
+        except Exception as e:
+            logger.warning(f"UART not available: {e}. Running in video-only mode.")
+            return False
+    
+    async def _uart_sender_loop(self):
+        """Background task that sends commands from queue without blocking"""
+        self.running = True
+        while self.running:
+            try:
+                throttle, steer = await asyncio.wait_for(
+                    self.command_queue.get(), 
+                    timeout=0.1
+                )
+                
+                if not self.ser:
+                    continue
+                
+                self.seq = (self.seq + 1) & 0xFFFF
+                cmd = f"T,{int(throttle)},{int(steer)},0,{self.seq}\n"
+                
+                # Run blocking UART in executor to not block event loop
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, self._send_uart, cmd.encode('ascii'))
+                
+                if throttle != 0 or steer != 0:
+                    logger.info(f"UART: T={throttle}, S={steer}")
+                    
+            except asyncio.TimeoutError:
+                continue
+            except Exception as e:
+                logger.error(f"UART sender error: {e}")
+    
+    def _send_uart(self, data):
+        """Blocking UART send - runs in executor"""
+        try:
+            self.ser.write(data)
+            self.ser.flush()
+        except Exception as e:
+            logger.error(f"UART write error: {e}")
+    
+    async def send_command(self, throttle, steer):
+        """Queue command for sending (non-blocking)"""
+        # Clamp values
+        throttle = max(-300, min(300, throttle))
+        steer = max(-1000, min(1000, steer))
+        
+        # Drop old command if queue full (keep only latest)
+        if self.command_queue.full():
+            try:
+                self.command_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+        
+        try:
+            self.command_queue.put_nowait((throttle, steer))
+        except asyncio.QueueFull:
+            pass  # Skip if still full
+    
+    def process_control_message(self, message):
+        """Process control message from DataChannel"""
+        try:
+            data = json.loads(message)
+            throttle = int(data.get('throttle', 0))
+            steer = int(data.get('steer', 0))
+            
+            # Schedule async send without blocking
+            asyncio.create_task(self.send_command(throttle, steer))
+            
+        except json.JSONDecodeError:
+            logger.warning(f"Invalid JSON in control message: {message}")
+        except Exception as e:
+            logger.error(f"Error processing control message: {e}")
+    
+    async def stop(self):
+        """Stop the car and close UART"""
+        self.running = False
+        if self.ser:
+            await self.send_command(0, 0)
+            await asyncio.sleep(0.2)
+            self.ser.close()
+            logger.info("UART closed")
+
+
+async def run_control_subscriber(car_controller, control_session_id):
+    """
+    Separate PeerConnection to receive control DataChannel from browser
+    """
+    try:
+        logger.info(f"Setting up control subscriber for session: {control_session_id}")
+        
+        # Create peer connection for receiving control
+        pc_control = RTCPeerConnection(
+            configuration=RTCConfiguration(
+                iceServers=[RTCIceServer(urls=['stun:stun.cloudflare.com:3478'])]
+            )
+        )
+        
+        # Use Cloudflare /datachannels/establish API
+        url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/new"
+        headers = {
+            'Authorization': f'Bearer {CLOUDFLARE_APP_SECRET}',
+            'Content-Type': 'application/json'
+        }
+        
+        # Create our own session
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers) as response:
+                if response.status != 201:
+                    logger.error(f"Failed to create subscriber session: {await response.text()}")
+                    return None
+                data = await response.json()
+                subscriber_session_id = data['sessionId']
+                logger.info(f"Created subscriber session: {subscriber_session_id}")
+        
+        establish_url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/{subscriber_session_id}/datachannels/establish"
+        establish_payload = {
+            'dataChannel': {
+                'location': 'remote',
+                'dataChannelName': 'server-events'
+            }
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(establish_url, headers=headers, json=establish_payload) as response:
+                response_text = await response.text()
+                
+                if response.status in [200, 201]:
+                    data = json.loads(response_text)
+                    
+                    if data.get('requiresImmediateRenegotiation'):
+                        await pc_control.setRemoteDescription(RTCSessionDescription(
+                            sdp=data['sessionDescription']['sdp'],
+                            type=data['sessionDescription']['type']
+                        ))
+                        
+                        # Create answer
+                        answer = await pc_control.createAnswer()
+                        await pc_control.setLocalDescription(answer)
+                        
+                        # Wait for ICE gathering
+                        while pc_control.iceGatheringState != 'complete':
+                            await asyncio.sleep(0.1)
+                        
+                        # Send answer back to Cloudflare
+                        renegotiate_url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/{subscriber_session_id}/renegotiate"
+                        renegotiate_payload = {
+                            'sessionDescription': {
+                                'type': 'answer',
+                                'sdp': pc_control.localDescription.sdp
+                            }
+                        }
+                        
+                        async with aiohttp.ClientSession() as renegotiate_session:
+                            async with renegotiate_session.put(renegotiate_url, headers=headers, json=renegotiate_payload) as renegotiate_response:
+                                if renegotiate_response.status not in [200, 201]:
+                                    logger.error(f"Failed to send answer: {await renegotiate_response.text()}")
+                                    return None
+                    elif data.get('sessionDescription'):
+                        await pc_control.setRemoteDescription(RTCSessionDescription(
+                            sdp=data['sessionDescription']['sdp'],
+                            type=data['sessionDescription']['type']
+                        ))
+                else:
+                    logger.error(f"Failed to establish transport: {response_text}")
+                    return None
+        
+        # Step 2: Subscribe to remote 'control' DataChannel from browser session
+        dc_new_url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/{subscriber_session_id}/datachannels/new"
+        dc_new_payload = {
+            'dataChannels': [
+                {
+                    'location': 'remote',
+                    'sessionId': control_session_id,
+                    'dataChannelName': 'control'
+                }
+            ]
+        }
+        
+        logger.info(f"Subscribing to control DataChannel from session {control_session_id}")
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(dc_new_url, headers=headers, json=dc_new_payload) as response:
+                response_text = await response.text()
+                
+                if response.status in [200, 201]:
+                    data = json.loads(response_text)
+                    
+                    # Create negotiated DataChannel with ID from API
+                    dc_id = data['dataChannels'][0]['id']
+                    logger.info(f"Creating negotiated DataChannel with ID: {dc_id}")
+                    
+                    # Create negotiated DataChannel - this will trigger ondatachannel when connected
+                    control_dc = pc_control.createDataChannel('control-subscribed', negotiated=True, id=dc_id)
+                    
+                    @control_dc.on('open')
+                    def on_open():
+                        logger.info(f"Control DataChannel opened!")
+                    
+                    @control_dc.on('message')
+                    def on_message(message):
+                        # Don't log every message - only errors
+                        if car_controller:
+                            car_controller.process_control_message(message)
+                    
+                    @control_dc.on('close')
+                    def on_close():
+                        logger.info("Control DataChannel closed")
+                        if car_controller:
+                            car_controller.send_command(0, 0)
+                    
+                    @control_dc.on('error')
+                    def on_error(error):
+                        logger.error(f"Control DataChannel error: {error}")
+                else:
+                    logger.error(f"Failed to subscribe to DataChannel: {response_text}")
+                    return None
+        
+        return pc_control
+        
+    except Exception as e:
+        logger.error(f"Error in control subscriber: {e}", exc_info=True)
+        return None
+
 async def run_stream():
     """
     Main function to stream video from Pi Camera
     """
+    car_controller = None
+    pc_control = None
+    uart_task = None
+    
     try:
-        # Create session
-        logger.info("Creating Cloudflare session...")
+        # Initialize car controller
+        car_controller = CarController()
+        if car_controller.init_uart():
+            # Start UART sender loop in background
+            uart_task = asyncio.create_task(car_controller._uart_sender_loop())
+        
+        # Create session for video
+        logger.info("Creating Cloudflare session for video...")
         session_id = await create_session()
-        logger.info(f"Session created: {session_id}")
+        logger.info(f"Video session created: {session_id}")
         
         # Register with signaling server
         await register_session(session_id)
@@ -303,6 +530,32 @@ async def run_stream():
         logger.info("Streaming started! Press Ctrl+C to stop.")
         logger.info(f"Track published with name: camera")
         
+        logger.info("Waiting for browser control connection...")
+        
+        # Poll signaling server for control session
+        control_session_id = None
+        for attempt in range(60):  # Wait up to 60 seconds
+            try:
+                url = f"{SIGNALING_SERVER}/api/control-session?id={session_id}"
+                async with aiohttp.ClientSession() as http_session:
+                    async with http_session.get(url, timeout=aiohttp.ClientTimeout(total=2)) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            control_session_id = data.get('controlSessionId')
+                            if control_session_id:
+                                logger.info(f"Got control session ID: {control_session_id}")
+                                break
+            except Exception as e:
+                pass
+            
+            await asyncio.sleep(1)
+        
+        if control_session_id and car_controller:
+            logger.info("Setting up control subscriber...")
+            pc_control = await run_control_subscriber(car_controller, control_session_id)
+        else:
+            logger.warning("No control session found - running video-only")
+        
         # Keep running
         try:
             while True:
@@ -316,10 +569,21 @@ async def run_stream():
         # Cleanup
         camera_track.stop()
         await pc.close()
+        
+        if pc_control:
+            await pc_control.close()
+        
+        if car_controller:
+            await car_controller.stop()
+            if uart_task:
+                await uart_task
+        
         logger.info("Stream stopped")
         
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
+        if car_controller:
+            await car_controller.stop()
         sys.exit(1)
 
 
