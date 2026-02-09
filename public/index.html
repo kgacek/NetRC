@@ -312,6 +312,7 @@
                         video.play().catch(e => console.error('Play error:', e));
                     }
                     if (event.track.kind === 'video') {
+                        tuneReceiverForLowLatency(peerConnection, event.track, video);
                         setupLatencyProbe(peerConnection, event.track);
                     }
                 };
@@ -736,6 +737,37 @@
                 });
             } catch (e) {
                 console.warn('Latency probe setup failed:', e);
+            }
+        }
+
+        function tuneReceiverForLowLatency(pc, track, video) {
+            try {
+                if (video) {
+                    video.playsInline = true;
+                    video.disablePictureInPicture = true;
+                    video.preload = 'auto';
+                }
+
+                const receiver = pc.getReceivers().find(r => r.track === track);
+                if (!receiver) return;
+
+                if (typeof receiver.playoutDelayHint === 'number') {
+                    receiver.playoutDelayHint = 0.0;
+                }
+
+                if (typeof receiver.jitterBufferTarget === 'number') {
+                    receiver.jitterBufferTarget = 0;
+                }
+
+                if (receiver.getParameters) {
+                    const params = receiver.getParameters();
+                    if (params && params.degradationPreference) {
+                        params.degradationPreference = 'maintain-framerate';
+                        receiver.setParameters(params).catch(() => {});
+                    }
+                }
+            } catch (e) {
+                console.warn('Low-latency tuning failed:', e);
             }
         }
 

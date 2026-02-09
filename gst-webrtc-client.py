@@ -28,10 +28,10 @@ CLOUDFLARE_API_BASE = 'https://rtc.live.cloudflare.com/v1'
 SIGNALING_SERVER = os.getenv('SIGNALING_SERVER', 'https://79-76-127-159.nip.io')
 
 # Video configuration
-WIDTH = 1920
-HEIGHT = 1080
+WIDTH = 1280
+HEIGHT = 720
 FRAMERATE = 30
-BITRATE = 5000000  # 5 Mbps for 1080p
+BITRATE = 5000000  # 5 Mbps for 720p
 
 # Low-latency tuning
 QUEUE_MAX_TIME_NS = 20_000_000  # 20 ms
