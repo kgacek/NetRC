@@ -468,7 +468,7 @@ class GStreamerWebRTC:
             '--flush',               # Low latency
             '--timeout', '0',        # Run indefinitely
             '--nopreview',           # No preview
-            '--denoise', 'cdn_off',  # Disable denoise for lower latency
+            #'--denoise', 'cdn_off',  # Disable denoise for lower latency
             '-o', self.fifo_path
         ], stdout=subprocess.DEVNULL, stderr=stderr_log)
         logger.info(f"Started rpicam-vid: {WIDTH}x{HEIGHT} @ {FRAMERATE}fps, {BITRATE/1000000}Mbps")
