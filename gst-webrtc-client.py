@@ -8,13 +8,15 @@ gi.require_version('Gst', '1.0')
 gi.require_version('GstWebRTC', '1.0')
 gi.require_version('GstSdp', '1.0')
 gi.require_version('GstRtp', '1.0')
-from gi.repository import Gst, GstWebRTC, GstSdp, GstRtp, GLib
+gi.require_version('GstApp', '1.0')
+from gi.repository import Gst, GstWebRTC, GstSdp, GstRtp, GstApp, GLib
 import json
 import os
 import sys
 import logging
 import stat
 import time
+import threading
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -42,6 +44,11 @@ class GStreamerWebRTC:
         self.rpicam_restart_count = 0
         self.fps_count = 0
         self.fps_last_time = time.monotonic()
+        self.appsrc = None
+        self.reader_thread = None
+        self.reader_stop = threading.Event()
+        self.drop_until_idr = False
+        self.appsrc_max_bytes = 512 * 1024
         
     def create_cloudflare_session(self):
         """Create new Cloudflare session"""
@@ -75,7 +82,8 @@ class GStreamerWebRTC:
         # GStreamer pipeline reads from FIFO (rpicam-vid already running)
         # otwierasz FIFO do czytania w trybie binarnym (blokujące)
         pipeline_str = f"""
-        filesrc location={self.fifo_path} do-timestamp=true !
+        appsrc name=src is-live=true do-timestamp=true format=time block=false
+            caps=video/x-h264,stream-format=byte-stream,alignment=nal !
         queue leaky=downstream max-size-time=100000000 max-size-bytes=0 max-size-buffers=0 !
         h264parse !
         video/x-h264,stream-format=avc,alignment=au,profile=baseline !
@@ -91,6 +99,9 @@ class GStreamerWebRTC:
         self.pipe = Gst.parse_launch(pipeline_str)
         
         self.webrtc = self.pipe.get_by_name('sendrecv')
+        self.appsrc = self.pipe.get_by_name('src')
+        if self.appsrc:
+            self.appsrc.set_property('max-bytes', self.appsrc_max_bytes)
         
         # Connect signals
         self.webrtc.connect('on-negotiation-needed', self.on_negotiation_needed)
@@ -115,7 +126,7 @@ class GStreamerWebRTC:
         # Track ICE gathering state
         self.pending_offer_sdp = None
 
-        # Start FPS measurement on RTP payloader
+        # Start FPS measurement on H.264 parser output (frame-level)
         self.setup_fps_probe()
         
     def on_negotiation_needed(self, element):
@@ -298,32 +309,23 @@ class GStreamerWebRTC:
 
     def setup_fps_probe(self):
         """Attach a buffer probe to measure real FPS"""
-        pay = self.pipe.get_by_name('rtph264pay0')
-        if not pay:
-            logger.warning("rtph264pay element not found for FPS probe")
+        parser = self.pipe.get_by_name('h264parse0')
+        if not parser:
+            logger.warning("h264parse element not found for FPS probe")
             return
 
-        src_pad = pay.get_static_pad('src')
+        src_pad = parser.get_static_pad('src')
         if not src_pad:
-            logger.warning("rtph264pay src pad not found for FPS probe")
+            logger.warning("h264parse src pad not found for FPS probe")
             return
 
-        src_pad.add_probe(Gst.PadProbeType.BUFFER, self.on_pay_buffer)
+        src_pad.add_probe(Gst.PadProbeType.BUFFER, self.on_frame_buffer)
         GLib.timeout_add_seconds(1, self.report_fps)
 
-    def on_pay_buffer(self, pad, info):
-        """Count RTP frames using marker bit to estimate FPS"""
+    def on_frame_buffer(self, pad, info):
+        """Count H.264 frame buffers to estimate FPS"""
         if info.type & Gst.PadProbeType.BUFFER:
-            buffer = info.get_buffer()
-            if buffer is None:
-                return Gst.PadProbeReturn.OK
-            ok, rtp = GstRtp.RTPBuffer.map(buffer, Gst.MapFlags.READ)
-            if ok:
-                try:
-                    if rtp.get_marker():
-                        self.fps_count += 1
-                finally:
-                    rtp.unmap()
+            self.fps_count += 1
         return Gst.PadProbeReturn.OK
 
     def report_fps(self):
@@ -393,6 +395,10 @@ class GStreamerWebRTC:
         finally:
             if self.pipe:
                 self.pipe.set_state(Gst.State.NULL)
+            if self.reader_stop:
+                self.reader_stop.set()
+            if self.reader_thread and self.reader_thread.is_alive():
+                self.reader_thread.join(timeout=2)
             if hasattr(self, 'rpicam_process'):
                 self.rpicam_process.terminate()
                 self.rpicam_process.wait()
@@ -466,6 +472,9 @@ class GStreamerWebRTC:
             
             logger.info("Pipeline started successfully!")
 
+            # Start FIFO reader feeding appsrc
+            self.start_fifo_reader()
+
             # Trigger negotiation only after caps are negotiated
             GLib.timeout_add(500, self.check_rtp_caps_ready)
             
@@ -474,6 +483,93 @@ class GStreamerWebRTC:
             self.main_loop.quit()
         
         return False  # Don't repeat
+
+    def start_fifo_reader(self):
+        """Start background thread that reads FIFO and pushes to appsrc"""
+        if not self.appsrc:
+            logger.error("appsrc not available; cannot start FIFO reader")
+            return
+        if self.reader_thread and self.reader_thread.is_alive():
+            return
+
+        self.reader_stop.clear()
+        self.reader_thread = threading.Thread(target=self._fifo_reader_loop, daemon=True)
+        self.reader_thread.start()
+        logger.info("Started FIFO reader thread")
+
+    def _fifo_reader_loop(self):
+        """Read H.264 byte-stream from FIFO, split by start codes, push to appsrc"""
+        buffer = bytearray()
+
+        while not self.reader_stop.is_set():
+            try:
+                with open(self.fifo_path, 'rb', buffering=0) as fifo:
+                    while not self.reader_stop.is_set():
+                        chunk = fifo.read(4096)
+                        if not chunk:
+                            time.sleep(0.005)
+                            continue
+                        buffer.extend(chunk)
+                        self._drain_nals(buffer)
+            except Exception as e:
+                logger.warning(f"FIFO reader error: {e}")
+                time.sleep(0.1)
+
+    def _find_start_code(self, data, offset):
+        """Return (index, length) of next H.264 start code or (-1, 0)"""
+        i3 = data.find(b'\x00\x00\x01', offset)
+        i4 = data.find(b'\x00\x00\x00\x01', offset)
+        if i3 == -1 and i4 == -1:
+            return -1, 0
+        if i3 == -1:
+            return i4, 4
+        if i4 == -1:
+            return i3, 3
+        return (i3, 3) if i3 < i4 else (i4, 4)
+
+    def _drain_nals(self, buffer):
+        """Extract NAL units from buffer and push to appsrc"""
+        while True:
+            start, sc_len = self._find_start_code(buffer, 0)
+            if start == -1:
+                # keep last 3 bytes to detect a start code split across reads
+                if len(buffer) > 3:
+                    del buffer[:-3]
+                return
+            if start > 0:
+                del buffer[:start]
+
+            next_start, _ = self._find_start_code(buffer, sc_len)
+            if next_start == -1:
+                return
+
+            nal = bytes(buffer[:next_start])
+            del buffer[:next_start]
+
+            self._push_nal(nal, sc_len)
+
+    def _push_nal(self, nal, sc_len):
+        """Push a single NAL unit to appsrc with simple drop strategy"""
+        if not self.appsrc or len(nal) <= sc_len:
+            return
+
+        nal_type = nal[sc_len] & 0x1F
+
+        # Drop strategy when appsrc is backlogged: skip non-IDR slices until next IDR
+        if self.appsrc.get_property('current-level-bytes') > self.appsrc_max_bytes:
+            self.drop_until_idr = True
+
+        if self.drop_until_idr:
+            if nal_type not in (5, 7, 8):
+                return
+            if nal_type == 5:
+                self.drop_until_idr = False
+
+        buf = Gst.Buffer.new_allocate(None, len(nal), None)
+        buf.fill(0, nal)
+        ret = self.appsrc.emit('push-buffer', buf)
+        if ret != Gst.FlowReturn.OK:
+            logger.debug(f"appsrc push-buffer returned {ret}")
 
 def main():
     if not CLOUDFLARE_APP_ID or not CLOUDFLARE_APP_SECRET:
