@@ -29,8 +29,7 @@ SIGNALING_SERVER = os.getenv('SIGNALING_SERVER', 'https://79-76-127-159.nip.io')
 WIDTH = 1280
 HEIGHT = 720
 FRAMERATE = 25
-BITRATE = 2000000  # 2 Mbps for 720p
-INTRA = max(1, FRAMERATE)  # Keyframe interval in frames (0.5s by default)
+BITRATE = 5000000  # 5 Mbps for 720p
 
 class GStreamerWebRTC:
     def __init__(self):
@@ -442,7 +441,7 @@ class GStreamerWebRTC:
             '--width', str(WIDTH),
             '--height', str(HEIGHT),
             '--framerate', str(FRAMERATE),
-            '--intra', str(INTRA),  # Shorter GOP improves recovery from drops
+            '--intra', str(FRAMERATE),  # Keyframe interval equal to framerate for 1 second GOP
             '--codec', 'h264',
             '--profile', 'baseline',
             '--level', '4',
