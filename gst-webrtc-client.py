@@ -17,6 +17,7 @@ import logging
 import stat
 import time
 import threading
+import struct
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -49,6 +50,7 @@ class GStreamerWebRTC:
         self.reader_stop = threading.Event()
         self.drop_until_idr = False
         self.appsrc_max_bytes = 512 * 1024
+        self.sei_uuid = bytes.fromhex("00112233445566778899aabbccddeeff")
         
     def create_cloudflare_session(self):
         """Create new Cloudflare session"""
@@ -555,6 +557,14 @@ class GStreamerWebRTC:
 
         nal_type = nal[sc_len] & 0x1F
 
+        # Inject SEI timestamp before each IDR frame
+        if nal_type == 5:
+            sei = self._build_sei_timestamp()
+            if sei:
+                sei_buf = Gst.Buffer.new_allocate(None, len(sei), None)
+                sei_buf.fill(0, sei)
+                self.appsrc.emit('push-buffer', sei_buf)
+
         # Drop strategy when appsrc is backlogged: skip non-IDR slices until next IDR
         if self.appsrc.get_property('current-level-bytes') > self.appsrc_max_bytes:
             self.drop_until_idr = True
@@ -570,6 +580,55 @@ class GStreamerWebRTC:
         ret = self.appsrc.emit('push-buffer', buf)
         if ret != Gst.FlowReturn.OK:
             logger.debug(f"appsrc push-buffer returned {ret}")
+
+    def _build_sei_timestamp(self):
+        """Build SEI user_data_unregistered NAL with wallclock ms timestamp"""
+        ts_ms = int(time.time() * 1000)
+        payload_text = f"ts_ms={ts_ms}".encode('ascii')
+        payload = self.sei_uuid + payload_text
+
+        sei_payload_type = 5  # user_data_unregistered
+        sei_payload_size = len(payload)
+
+        rbsp = bytearray()
+
+        # payload type
+        while sei_payload_type >= 0xFF:
+            rbsp.append(0xFF)
+            sei_payload_type -= 0xFF
+        rbsp.append(sei_payload_type)
+
+        # payload size
+        size = sei_payload_size
+        while size >= 0xFF:
+            rbsp.append(0xFF)
+            size -= 0xFF
+        rbsp.append(size)
+
+        rbsp.extend(payload)
+
+        # rbsp_trailing_bits
+        rbsp.append(0x80)
+
+        rbsp = self._add_emulation_prevention(rbsp)
+
+        # start code + nal header (type 6)
+        return b"\x00\x00\x00\x01" + bytes([0x06]) + rbsp
+
+    def _add_emulation_prevention(self, rbsp):
+        """Insert emulation prevention bytes into RBSP"""
+        out = bytearray()
+        zeros = 0
+        for b in rbsp:
+            if zeros == 2 and b <= 0x03:
+                out.append(0x03)
+                zeros = 0
+            out.append(b)
+            if b == 0x00:
+                zeros += 1
+            else:
+                zeros = 0
+        return out
 
 def main():
     if not CLOUDFLARE_APP_ID or not CLOUDFLARE_APP_SECRET:

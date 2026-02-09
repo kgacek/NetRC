@@ -133,6 +133,10 @@
         <div id="status" class="status">
             Waiting to connect...
         </div>
+
+        <div id="latency" class="status" style="margin-top: 10px; border-left-color: #ffa500;">
+            Latency: -- ms
+        </div>
         
         <div class="controls" style="margin-top: 20px; text-align: center; color: #888;">
             <p><strong>Car Controls:</strong> W/S - Forward/Reverse | A/D - Left/Right | SPACE - Emergency Brake | R - Reset</p>
@@ -295,7 +299,8 @@
                     iceServers: [
                         { urls: 'stun:stun.cloudflare.com:3478' }
                     ],
-                    bundlePolicy: 'max-bundle'
+                    bundlePolicy: 'max-bundle',
+                    encodedInsertableStreams: true
                 });
 
                 peerConnection.ontrack = (event) => {
@@ -305,6 +310,9 @@
                     if (event.streams && event.streams[0]) {
                         video.srcObject = event.streams[0];
                         video.play().catch(e => console.error('Play error:', e));
+                    }
+                    if (event.track.kind === 'video') {
+                        setupLatencyProbe(peerConnection, event.track);
                     }
                 };
 
@@ -691,6 +699,112 @@
                 setTimeout(loadSessions, 500);
             }
         });
+
+        // === SEI latency probe (H.264 user_data_unregistered) ===
+        function updateLatencyDisplay(ms) {
+            const el = document.getElementById('latency');
+            el.textContent = `Latency: ${ms.toFixed(0)} ms`;
+        }
+
+        function setupLatencyProbe(pc, track) {
+            try {
+                const receiver = pc.getReceivers().find(r => r.track === track);
+                if (!receiver || typeof receiver.createEncodedStreams !== 'function') {
+                    console.warn('Encoded streams not available; latency probe disabled');
+                    return;
+                }
+
+                const { readable, writable } = receiver.createEncodedStreams();
+                const transform = new TransformStream({
+                    transform: (chunk, controller) => {
+                        try {
+                            const data = new Uint8Array(chunk.data);
+                            const ts = extractSeiTimestampMs(data);
+                            if (ts) {
+                                const latency = Date.now() - ts;
+                                updateLatencyDisplay(latency);
+                            }
+                        } catch (e) {
+                            console.warn('SEI parse error:', e);
+                        }
+                        controller.enqueue(chunk);
+                    }
+                });
+
+                readable.pipeThrough(transform).pipeTo(writable).catch(e => {
+                    console.warn('Encoded stream pipe error:', e);
+                });
+            } catch (e) {
+                console.warn('Latency probe setup failed:', e);
+            }
+        }
+
+        function extractSeiTimestampMs(data) {
+            // Try Annex-B start codes first
+            let foundStartCode = data.includes(0x01) &&
+                (data.includes(0x00));
+
+            if (foundStartCode) {
+                let i = 0;
+                while (i + 4 <= data.length) {
+                    const sc3 = data[i] === 0x00 && data[i + 1] === 0x00 && data[i + 2] === 0x01;
+                    const sc4 = data[i] === 0x00 && data[i + 1] === 0x00 && data[i + 2] === 0x00 && data[i + 3] === 0x01;
+                    if (sc3 || sc4) {
+                        const scLen = sc3 ? 3 : 4;
+                        const nalStart = i + scLen;
+                        const nalType = data[nalStart] & 0x1f;
+                        if (nalType === 6) {
+                            const ts = parseSeiUserData(data, nalStart + 1, data.length);
+                            if (ts) return ts;
+                        }
+                        i = nalStart + 1;
+                        continue;
+                    }
+                    i++;
+                }
+            }
+
+            // Fallback: length-prefixed NAL (4-byte)
+            let offset = 0;
+            while (offset + 4 <= data.length) {
+                const nalSize = (data[offset] << 24) | (data[offset + 1] << 16) | (data[offset + 2] << 8) | data[offset + 3];
+                offset += 4;
+                if (nalSize <= 0 || offset + nalSize > data.length) break;
+                const nalType = data[offset] & 0x1f;
+                if (nalType === 6) {
+                    const ts = parseSeiUserData(data, offset + 1, offset + nalSize);
+                    if (ts) return ts;
+                }
+                offset += nalSize;
+            }
+
+            return null;
+        }
+
+        function parseSeiUserData(data, start, end) {
+            let i = start;
+            let payloadType = 0;
+            while (i < end && data[i] === 0xFF) { payloadType += 255; i++; }
+            if (i >= end) return null;
+            payloadType += data[i++];
+
+            let payloadSize = 0;
+            while (i < end && data[i] === 0xFF) { payloadSize += 255; i++; }
+            if (i >= end) return null;
+            payloadSize += data[i++];
+
+            if (payloadType !== 5 || i + payloadSize > end) return null;
+
+            const uuid = data.slice(i, i + 16);
+            const uuidHex = Array.from(uuid).map(b => b.toString(16).padStart(2, '0')).join('');
+            if (uuidHex !== '00112233445566778899aabbccddeeff') return null;
+
+            const textBytes = data.slice(i + 16, i + payloadSize);
+            const text = new TextDecoder().decode(textBytes);
+            const match = text.match(/ts_ms=(\d+)/);
+            if (!match) return null;
+            return Number(match[1]);
+        }
     </script>
 </body>
 </html>
