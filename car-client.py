@@ -225,8 +225,6 @@ class CarController:
         self.uart_baud = uart_baud
         self.ser = None
         self.seq = 0
-        self.command_queue = asyncio.Queue(maxsize=5)  # Drop old commands if queue full
-        self.running = False
         
     def init_uart(self):
         """Initialize UART connection"""
@@ -241,59 +239,23 @@ class CarController:
             logger.warning(f"UART not available: {e}. Running in video-only mode.")
             return False
     
-    async def _uart_sender_loop(self):
-        """Background task that sends commands from queue without blocking"""
-        self.running = True
-        while self.running:
-            try:
-                throttle, steer = await asyncio.wait_for(
-                    self.command_queue.get(), 
-                    timeout=0.1
-                )
-                
-                if not self.ser:
-                    continue
-                
-                self.seq = (self.seq + 1) & 0xFFFF
-                cmd = f"T,{int(throttle)},{int(steer)},0,{self.seq}\n"
-                
-                # Run blocking UART in executor to not block event loop
-                loop = asyncio.get_event_loop()
-                await loop.run_in_executor(None, self._send_uart, cmd.encode('ascii'))
-                
-                if throttle != 0 or steer != 0:
-                    logger.info(f"UART: T={throttle}, S={steer}")
-                    
-            except asyncio.TimeoutError:
-                continue
-            except Exception as e:
-                logger.error(f"UART sender error: {e}")
-    
-    def _send_uart(self, data):
-        """Blocking UART send - runs in executor"""
+    def send_command(self, throttle, steer):
+        """Send command to ESP32 via UART"""
+        if not self.ser:
+            logger.warning("UART not available, cannot send command")
+            return
+        
+        self.seq = (self.seq + 1) & 0xFFFF
+        cmd = f"T,{int(throttle)},{int(steer)},0,{self.seq}\n"
+        
         try:
-            self.ser.write(data)
+            self.ser.write(cmd.encode('ascii'))
             self.ser.flush()
+            # Only log non-zero commands to reduce spam
+            if throttle != 0 or steer != 0:
+                logger.info(f"UART: T={throttle}, S={steer}")
         except Exception as e:
-            logger.error(f"UART write error: {e}")
-    
-    async def send_command(self, throttle, steer):
-        """Queue command for sending (non-blocking)"""
-        # Clamp values
-        throttle = max(-300, min(300, throttle))
-        steer = max(-1000, min(1000, steer))
-        
-        # Drop old command if queue full (keep only latest)
-        if self.command_queue.full():
-            try:
-                self.command_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                pass
-        
-        try:
-            self.command_queue.put_nowait((throttle, steer))
-        except asyncio.QueueFull:
-            pass  # Skip if still full
+            logger.error(f"UART send error: {e}")
     
     def process_control_message(self, message):
         """Process control message from DataChannel"""
@@ -302,20 +264,22 @@ class CarController:
             throttle = int(data.get('throttle', 0))
             steer = int(data.get('steer', 0))
             
-            # Schedule async send without blocking
-            asyncio.create_task(self.send_command(throttle, steer))
+            # Clamp values to safe ranges
+            throttle = max(-300, min(300, throttle))
+            steer = max(-1000, min(1000, steer))
+            
+            self.send_command(throttle, steer)
             
         except json.JSONDecodeError:
             logger.warning(f"Invalid JSON in control message: {message}")
         except Exception as e:
             logger.error(f"Error processing control message: {e}")
     
-    async def stop(self):
+    def stop(self):
         """Stop the car and close UART"""
-        self.running = False
         if self.ser:
-            await self.send_command(0, 0)
-            await asyncio.sleep(0.2)
+            self.send_command(0, 0)
+            time.sleep(0.1)
             self.ser.close()
             logger.info("UART closed")
 
@@ -351,6 +315,7 @@ async def run_control_subscriber(car_controller, control_session_id):
                 subscriber_session_id = data['sessionId']
                 logger.info(f"Created subscriber session: {subscriber_session_id}")
         
+        # Step 1: Establish DataChannel transport (like Cloudflare example)
         establish_url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/{subscriber_session_id}/datachannels/establish"
         establish_payload = {
             'dataChannel': {
@@ -359,18 +324,23 @@ async def run_control_subscriber(car_controller, control_session_id):
             }
         }
         
+        logger.info(f"Establishing DataChannel transport...")
+        
         async with aiohttp.ClientSession() as session:
             async with session.post(establish_url, headers=headers, json=establish_payload) as response:
                 response_text = await response.text()
+                logger.info(f"Establish transport response: {response_text}")
                 
                 if response.status in [200, 201]:
                     data = json.loads(response_text)
                     
                     if data.get('requiresImmediateRenegotiation'):
+                        # We got an offer from Cloudflare, need to answer
                         await pc_control.setRemoteDescription(RTCSessionDescription(
                             sdp=data['sessionDescription']['sdp'],
                             type=data['sessionDescription']['type']
                         ))
+                        logger.info("Received offer from Cloudflare, creating answer")
                         
                         # Create answer
                         answer = await pc_control.createAnswer()
@@ -391,14 +361,18 @@ async def run_control_subscriber(car_controller, control_session_id):
                         
                         async with aiohttp.ClientSession() as renegotiate_session:
                             async with renegotiate_session.put(renegotiate_url, headers=headers, json=renegotiate_payload) as renegotiate_response:
-                                if renegotiate_response.status not in [200, 201]:
+                                if renegotiate_response.status in [200, 201]:
+                                    logger.info("Transport renegotiation complete")
+                                else:
                                     logger.error(f"Failed to send answer: {await renegotiate_response.text()}")
                                     return None
                     elif data.get('sessionDescription'):
+                        # Got answer from Cloudflare directly
                         await pc_control.setRemoteDescription(RTCSessionDescription(
                             sdp=data['sessionDescription']['sdp'],
                             type=data['sessionDescription']['type']
                         ))
+                        logger.info("Transport established")
                 else:
                     logger.error(f"Failed to establish transport: {response_text}")
                     return None
@@ -420,6 +394,7 @@ async def run_control_subscriber(car_controller, control_session_id):
         async with aiohttp.ClientSession() as session:
             async with session.post(dc_new_url, headers=headers, json=dc_new_payload) as response:
                 response_text = await response.text()
+                logger.info(f"DataChannel subscription response: {response_text}")
                 
                 if response.status in [200, 201]:
                     data = json.loads(response_text)
@@ -450,6 +425,8 @@ async def run_control_subscriber(car_controller, control_session_id):
                     @control_dc.on('error')
                     def on_error(error):
                         logger.error(f"Control DataChannel error: {error}")
+                    
+                    logger.info(f"Control DataChannel subscribed successfully")
                 else:
                     logger.error(f"Failed to subscribe to DataChannel: {response_text}")
                     return None
@@ -466,14 +443,11 @@ async def run_stream():
     """
     car_controller = None
     pc_control = None
-    uart_task = None
     
     try:
         # Initialize car controller
         car_controller = CarController()
-        if car_controller.init_uart():
-            # Start UART sender loop in background
-            uart_task = asyncio.create_task(car_controller._uart_sender_loop())
+        car_controller.init_uart()
         
         # Create session for video
         logger.info("Creating Cloudflare session for video...")
@@ -574,16 +548,14 @@ async def run_stream():
             await pc_control.close()
         
         if car_controller:
-            await car_controller.stop()
-            if uart_task:
-                await uart_task
+            car_controller.stop()
         
         logger.info("Stream stopped")
         
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
         if car_controller:
-            await car_controller.stop()
+            car_controller.stop()
         sys.exit(1)
 
 

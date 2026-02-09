@@ -110,7 +110,7 @@
         
         <div class="controls">
             <input type="text" id="appId" placeholder="Cloudflare App ID" />
-            <input type="password" id="appSecret" placeholder="Cloudflare App Secret" />
+            <input type="text" id="appSecret" placeholder="Cloudflare App Secret" />
             <input type="text" id="signalingServer" placeholder="Signaling Server" value="https://79-76-127-159.nip.io" />
             <button class="refresh-btn" onclick="loadSessions()">Refresh Sessions</button>
         </div>
@@ -133,10 +133,6 @@
         <div id="status" class="status">
             Waiting to connect...
         </div>
-
-        <div id="latency" class="status" style="margin-top: 10px; border-left-color: #ffa500;">
-            Latency: -- ms
-        </div>
         
         <div class="controls" style="margin-top: 20px; text-align: center; color: #888;">
             <p><strong>Car Controls:</strong> W/S - Forward/Reverse | A/D - Left/Right | SPACE - Emergency Brake | R - Reset</p>
@@ -150,17 +146,6 @@
         let mySessionId = null;
         let myControlSessionId = null;
         let selectedSessionId = null;
-        
-        // Load saved credentials on page load
-        window.addEventListener('DOMContentLoaded', () => {
-            const savedAppId = localStorage.getItem('cf_app_id');
-            const savedAppSecret = localStorage.getItem('cf_app_secret');
-            const savedSignalingServer = localStorage.getItem('signaling_server');
-            
-            if (savedAppId) document.getElementById('appId').value = savedAppId;
-            if (savedAppSecret) document.getElementById('appSecret').value = savedAppSecret;
-            if (savedSignalingServer) document.getElementById('signalingServer').value = savedSignalingServer;
-        });
         
         // Car control state
         let throttle = 0;
@@ -253,17 +238,11 @@
             const appId = document.getElementById('appId').value.trim();
             const appSecret = document.getElementById('appSecret').value.trim();
             const rpiSessionId = document.getElementById('sessionId').value.trim();
-            const signalingServer = document.getElementById('signalingServer').value.trim();
 
             if (!appId || !appSecret || !rpiSessionId) {
                 updateStatus('Please fill in all fields', 'error');
                 return;
             }
-            
-            // Save credentials to localStorage
-            localStorage.setItem('cf_app_id', appId);
-            localStorage.setItem('cf_app_secret', appSecret);
-            localStorage.setItem('signaling_server', signalingServer);
             
             // IMPORTANT: Disconnect old connections first
             if (peerConnection || controlConnection) {
@@ -299,8 +278,7 @@
                     iceServers: [
                         { urls: 'stun:stun.cloudflare.com:3478' }
                     ],
-                    bundlePolicy: 'max-bundle',
-                    encodedInsertableStreams: true
+                    bundlePolicy: 'max-bundle'
                 });
 
                 peerConnection.ontrack = (event) => {
@@ -310,10 +288,6 @@
                     if (event.streams && event.streams[0]) {
                         video.srcObject = event.streams[0];
                         video.play().catch(e => console.error('Play error:', e));
-                    }
-                    if (event.track.kind === 'video') {
-                        tuneReceiverForLowLatency(peerConnection, event.track, video);
-                        setupLatencyProbe(peerConnection, event.track);
                     }
                 };
 
@@ -504,11 +478,11 @@
                 );
                 
                 const establishData = await establishResponse.json();
+                console.log('Establish transport response:', establishData);
                 
                 if (!establishResponse.ok) {
                     throw new Error(`Failed to establish transport: ${JSON.stringify(establishData)}`);
                 }
-                console.log('Transport established');
                 
                 if (establishData.requiresImmediateRenegotiation) {
                     await controlConnection.setRemoteDescription(establishData.sessionDescription);
@@ -535,6 +509,8 @@
                     await controlConnection.setRemoteDescription(establishData.sessionDescription);
                 }
                 
+                // Now create the actual control DataChannel using /datachannels/new
+                console.log('Creating control DataChannel...');
                 const dcNewResponse = await fetch(
                     `https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${myControlSessionId}/datachannels/new`,
                     {
@@ -553,12 +529,14 @@
                 );
                 
                 const dcNewData = await dcNewResponse.json();
+                console.log('DataChannel new response:', dcNewData);
                 
                 if (!dcNewResponse.ok) {
                     throw new Error(`Failed to create DataChannel: ${JSON.stringify(dcNewData)}`);
                 }
                 
                 const controlChannelId = dcNewData.dataChannels[0].id;
+                console.log('Browser DataChannel ID:', controlChannelId);
                 
                 // Register control session with signaling server BEFORE creating negotiated DataChannel
                 // This allows RPi to start subscribing
@@ -573,21 +551,27 @@
                                 controlSessionId: myControlSessionId
                             })
                         });
-                        console.log('Control session registered, waiting for RPi...');
-                        await new Promise(resolve => setTimeout(resolve, 3000));
+                        console.log('Control session registered with signaling server');
+                        
+                        // Wait for RPi to complete its subscription
+                        console.log('Waiting 2s for RPi to subscribe...');
+                        await new Promise(resolve => setTimeout(resolve, 2000));
                         
                     } catch (e) {
                         console.warn('Could not register control session:', e);
                     }
                 }
                 
+                // NOW create negotiated DataChannel after RPi had time to subscribe
                 controlChannel = controlConnection.createDataChannel('control', {
                     negotiated: true,
                     id: controlChannelId
                 });
                 
+                console.log(`Created negotiated DataChannel with ID: ${controlChannelId}`);
+                
                 controlChannel.onopen = () => {
-                    console.log('Control ready');
+                    console.log('Control DataChannel opened');
                     updateStatus('Control ready! Use WASD to drive.', 'success');
                     startControlLoop();
                 };
@@ -600,6 +584,8 @@
                 controlChannel.onerror = (error) => {
                     console.error('DataChannel error:', error);
                 };
+                
+                console.log('Control setup complete!');
                 
             } catch (error) {
                 console.error('Control setup error:', error);
@@ -634,12 +620,28 @@
                 }
             }
             
-            if (controlChannel && controlChannel.readyState === 'open') {
-                const command = JSON.stringify({
-                    throttle: Math.round(throttle),
-                    steer: Math.round(steer)
-                });
-                controlChannel.send(command);
+            // Send control command via DataChannel
+            if (controlChannel) {
+                if (controlChannel.readyState === 'open') {
+                    const command = JSON.stringify({
+                        throttle: Math.round(throttle),
+                        steer: Math.round(steer)
+                    });
+                    controlChannel.send(command);
+                    
+                    // Debug: log every 20 sends (about 1 per second)
+                    if (Math.random() < 0.05) {
+                        console.log('Sent control:', command);
+                    }
+                } else {
+                    if (Math.random() < 0.05) {
+                        console.log('Control channel not open:', controlChannel.readyState);
+                    }
+                }
+            } else {
+                if (Math.random() < 0.05) {
+                    console.log('No control channel');
+                }
             }
         }
         
@@ -700,143 +702,6 @@
                 setTimeout(loadSessions, 500);
             }
         });
-
-        // === SEI latency probe (H.264 user_data_unregistered) ===
-        function updateLatencyDisplay(ms) {
-            const el = document.getElementById('latency');
-            el.textContent = `Latency: ${ms.toFixed(0)} ms`;
-        }
-
-        function setupLatencyProbe(pc, track) {
-            try {
-                const receiver = pc.getReceivers().find(r => r.track === track);
-                if (!receiver || typeof receiver.createEncodedStreams !== 'function') {
-                    console.warn('Encoded streams not available; latency probe disabled');
-                    return;
-                }
-
-                const { readable, writable } = receiver.createEncodedStreams();
-                const transform = new TransformStream({
-                    transform: (chunk, controller) => {
-                        try {
-                            const data = new Uint8Array(chunk.data);
-                            const ts = extractSeiTimestampMs(data);
-                            if (ts) {
-                                const latency = Date.now() - ts;
-                                updateLatencyDisplay(latency);
-                            }
-                        } catch (e) {
-                            console.warn('SEI parse error:', e);
-                        }
-                        controller.enqueue(chunk);
-                    }
-                });
-
-                readable.pipeThrough(transform).pipeTo(writable).catch(e => {
-                    console.warn('Encoded stream pipe error:', e);
-                });
-            } catch (e) {
-                console.warn('Latency probe setup failed:', e);
-            }
-        }
-
-        function tuneReceiverForLowLatency(pc, track, video) {
-            try {
-                if (video) {
-                    video.playsInline = true;
-                    video.disablePictureInPicture = true;
-                    video.preload = 'auto';
-                }
-
-                const receiver = pc.getReceivers().find(r => r.track === track);
-                if (!receiver) return;
-
-                if (typeof receiver.playoutDelayHint === 'number') {
-                    receiver.playoutDelayHint = 0.0;
-                }
-
-                if (typeof receiver.jitterBufferTarget === 'number') {
-                    receiver.jitterBufferTarget = 0;
-                }
-
-                if (receiver.getParameters) {
-                    const params = receiver.getParameters();
-                    if (params && params.degradationPreference) {
-                        params.degradationPreference = 'maintain-framerate';
-                        receiver.setParameters(params).catch(() => {});
-                    }
-                }
-            } catch (e) {
-                console.warn('Low-latency tuning failed:', e);
-            }
-        }
-
-        function extractSeiTimestampMs(data) {
-            // Try Annex-B start codes first
-            let foundStartCode = data.includes(0x01) &&
-                (data.includes(0x00));
-
-            if (foundStartCode) {
-                let i = 0;
-                while (i + 4 <= data.length) {
-                    const sc3 = data[i] === 0x00 && data[i + 1] === 0x00 && data[i + 2] === 0x01;
-                    const sc4 = data[i] === 0x00 && data[i + 1] === 0x00 && data[i + 2] === 0x00 && data[i + 3] === 0x01;
-                    if (sc3 || sc4) {
-                        const scLen = sc3 ? 3 : 4;
-                        const nalStart = i + scLen;
-                        const nalType = data[nalStart] & 0x1f;
-                        if (nalType === 6) {
-                            const ts = parseSeiUserData(data, nalStart + 1, data.length);
-                            if (ts) return ts;
-                        }
-                        i = nalStart + 1;
-                        continue;
-                    }
-                    i++;
-                }
-            }
-
-            // Fallback: length-prefixed NAL (4-byte)
-            let offset = 0;
-            while (offset + 4 <= data.length) {
-                const nalSize = (data[offset] << 24) | (data[offset + 1] << 16) | (data[offset + 2] << 8) | data[offset + 3];
-                offset += 4;
-                if (nalSize <= 0 || offset + nalSize > data.length) break;
-                const nalType = data[offset] & 0x1f;
-                if (nalType === 6) {
-                    const ts = parseSeiUserData(data, offset + 1, offset + nalSize);
-                    if (ts) return ts;
-                }
-                offset += nalSize;
-            }
-
-            return null;
-        }
-
-        function parseSeiUserData(data, start, end) {
-            let i = start;
-            let payloadType = 0;
-            while (i < end && data[i] === 0xFF) { payloadType += 255; i++; }
-            if (i >= end) return null;
-            payloadType += data[i++];
-
-            let payloadSize = 0;
-            while (i < end && data[i] === 0xFF) { payloadSize += 255; i++; }
-            if (i >= end) return null;
-            payloadSize += data[i++];
-
-            if (payloadType !== 5 || i + payloadSize > end) return null;
-
-            const uuid = data.slice(i, i + 16);
-            const uuidHex = Array.from(uuid).map(b => b.toString(16).padStart(2, '0')).join('');
-            if (uuidHex !== '00112233445566778899aabbccddeeff') return null;
-
-            const textBytes = data.slice(i + 16, i + payloadSize);
-            const text = new TextDecoder().decode(textBytes);
-            const match = text.match(/ts_ms=(\d+)/);
-            if (!match) return null;
-            return Number(match[1]);
-        }
     </script>
 </body>
 </html>

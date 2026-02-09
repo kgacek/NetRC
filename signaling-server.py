@@ -33,7 +33,8 @@ class SignalingHandler(BaseHTTPRequestHandler):
             sessions[session_id] = {
                 'sessionId': session_id,
                 'type': 'publisher',
-                'timestamp': time.time()
+                'timestamp': time.time(),
+                'controlSessionId': None  # Will be set when browser connects
             }
             
             self.send_response(200)
@@ -42,6 +43,28 @@ class SignalingHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({'success': True}).encode())
             print(f"Publisher registered: {session_id}")
+        
+        elif self.path == '/api/control':
+            content_length = int(self.headers['Content-Length'])
+            body = self.rfile.read(content_length)
+            data = json.loads(body.decode('utf-8'))
+            
+            video_session_id = data.get('videoSessionId')
+            control_session_id = data.get('controlSessionId')
+            
+            if video_session_id and video_session_id in sessions:
+                sessions[video_session_id]['controlSessionId'] = control_session_id
+                print(f"Control session linked: {video_session_id} -> {control_session_id}")
+                
+                self.send_response(200)
+                self._send_cors_headers()
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': True}).encode())
+            else:
+                self.send_response(404)
+                self._send_cors_headers()
+                self.end_headers()
         
         else:
             self.send_response(404)
@@ -74,6 +97,30 @@ class SignalingHandler(BaseHTTPRequestHandler):
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()
                 self.wfile.write(json.dumps(sessions[session_id]).encode())
+            else:
+                self.send_response(404)
+                self._send_cors_headers()
+                self.end_headers()
+        
+        elif parsed_path.path == '/api/control-session':
+            # Get control session ID for a video session
+            query = parse_qs(parsed_path.query)
+            video_session_id = query.get('id', [None])[0]
+            
+            if video_session_id and video_session_id in sessions:
+                control_session_id = sessions[video_session_id].get('controlSessionId')
+                if control_session_id:
+                    self.send_response(200)
+                    self._send_cors_headers()
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'controlSessionId': control_session_id}).encode())
+                else:
+                    self.send_response(404)
+                    self._send_cors_headers()
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'error': 'No control session'}).encode())
             else:
                 self.send_response(404)
                 self._send_cors_headers()
