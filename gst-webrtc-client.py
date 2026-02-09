@@ -30,6 +30,7 @@ WIDTH = 1280
 HEIGHT = 720
 FRAMERATE = 25
 BITRATE = 5000000  # 5 Mbps for 720p
+INTRA = max(1, FRAMERATE // 2)  # Keyframe interval in frames (0.5s by default)
 
 class GStreamerWebRTC:
     def __init__(self):
@@ -76,7 +77,7 @@ class GStreamerWebRTC:
         # otwierasz FIFO do czytania w trybie binarnym (blokujące)
         pipeline_str = f"""
         filesrc location={self.fifo_path} do-timestamp=true !
-        queue leaky=downstream max-size-time=30000000 max-size-bytes=0 max-size-buffers=1 !
+        queue leaky=downstream max-size-time=30000000 max-size-bytes=0 max-size-buffers=0 !
         h264parse !
         video/x-h264,stream-format=avc,alignment=au,profile=baseline !
         rtph264pay pt=96 mtu=1200 config-interval=1 aggregate-mode=zero-latency !
@@ -441,7 +442,7 @@ class GStreamerWebRTC:
             '--width', str(WIDTH),
             '--height', str(HEIGHT),
             '--framerate', str(FRAMERATE),
-            '--intra', str(FRAMERATE),  # Keyframe interval equal to framerate for 1 second GOP
+            '--intra', str(INTRA),  # Shorter GOP improves recovery from drops
             '--codec', 'h264',
             '--profile', 'baseline',
             '--level', '4',
