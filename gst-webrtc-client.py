@@ -258,14 +258,16 @@ async def run_control_subscriber(car_controller, control_session_id):
                     def on_error(error):
                         logger.error(f"Control DataChannel error: {error}")
                     
-                    logger.info(f"Control DataChannel subscribed successfully")
-                    
-                    # Keep connection alive
-                    while True:
-                        await asyncio.sleep(1)
+                    # Monitor connection state
+                    @pc_control.on('connectionstatechange')
+                    async def on_connectionstatechange():
+                        logger.info(f"Control connection state: {pc_control.connectionState}")
                         if pc_control.connectionState in ['failed', 'closed']:
                             logger.warning("Control connection failed or closed")
-                            break
+                            if car_controller:
+                                car_controller.send_command(0, 0)
+                    
+                    logger.info(f"Control DataChannel subscribed successfully")
                 else:
                     logger.error(f"Failed to subscribe to DataChannel: {response_text}")
                     return None
@@ -285,6 +287,7 @@ class GStreamerWebRTC:
         self.session_id = None
         self.car_controller = None
         self.control_session_id = None
+        self.pc_control = None
         self.fifo_path = '/tmp/h264_fifo'
         self.rpicam_process = None
         self.rpicam_restart_count = 0
@@ -662,6 +665,14 @@ class GStreamerWebRTC:
                     os.remove(self.fifo_path)
             if self.car_controller:
                 self.car_controller.stop()
+            if self.pc_control:
+                # Close control connection if exists
+                try:
+                    import asyncio
+                    loop = asyncio.new_event_loop()
+                    loop.run_until_complete(self.pc_control.close())
+                except:
+                    pass
     
     def initialize(self):
         """Initialize pipeline (called from GLib idle)"""
@@ -889,7 +900,16 @@ class GStreamerWebRTC:
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            loop.run_until_complete(run_control_subscriber(self.car_controller, self.control_session_id))
+            
+            # Create task and keep loop running
+            async def run_subscriber():
+                self.pc_control = await run_control_subscriber(self.car_controller, self.control_session_id)
+                if self.pc_control:
+                    # Keep loop alive while connection is active
+                    while True:
+                        await asyncio.sleep(1)
+            
+            loop.run_until_complete(run_subscriber())
         except Exception as e:
             logger.error(f"Error setting up control subscriber: {e}", exc_info=True)
 
