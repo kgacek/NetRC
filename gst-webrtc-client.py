@@ -30,7 +30,7 @@ SIGNALING_SERVER = os.getenv('SIGNALING_SERVER', 'https://79-76-127-159.nip.io')
 # Video configuration
 WIDTH = 1280
 HEIGHT = 720
-FRAMERATE = 25
+FRAMERATE = 30
 BITRATE = 5000000  # 5 Mbps for 720p
 
 # Low-latency tuning
