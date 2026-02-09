@@ -34,10 +34,10 @@ FRAMERATE = 30
 BITRATE = 5000000  # 5 Mbps for 1080p
 
 # Low-latency tuning
-QUEUE_MAX_TIME_NS = 50_000_000  # 50 ms
+QUEUE_MAX_TIME_NS = 20_000_000  # 20 ms
 QUEUE_MAX_BUFFERS = 0
-APPsrc_HIGH_WATERMARK = 256 * 1024  # bytes
-APPsrc_LOW_WATERMARK = 128 * 1024   # bytes
+APPsrc_HIGH_WATERMARK = 128 * 1024  # bytes
+APPsrc_LOW_WATERMARK = 64 * 1024    # bytes
 
 class GStreamerWebRTC:
     def __init__(self):
@@ -114,6 +114,8 @@ class GStreamerWebRTC:
         self.appsrc = self.pipe.get_by_name('src')
         if self.appsrc:
             self.appsrc.set_property('max-bytes', self.appsrc_max_bytes)
+            self.appsrc.set_property('min-latency', 0)
+            self.appsrc.set_property('max-latency', 0)
         
         # Connect signals
         self.webrtc.connect('on-negotiation-needed', self.on_negotiation_needed)
