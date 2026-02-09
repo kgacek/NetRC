@@ -17,6 +17,10 @@ import logging
 import stat
 import time
 import threading
+import serial
+import serial.tools.list_ports
+import asyncio
+import aiohttp
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -26,6 +30,10 @@ CLOUDFLARE_APP_ID = os.getenv('CF_REALTIME_APP_ID')
 CLOUDFLARE_APP_SECRET = os.getenv('CF_REALTIME_TOKEN')
 CLOUDFLARE_API_BASE = 'https://rtc.live.cloudflare.com/v1'
 SIGNALING_SERVER = os.getenv('SIGNALING_SERVER', 'https://79-76-127-159.nip.io')
+
+# UART configuration for car control
+UART_DEV = os.getenv('UART_DEV', '/dev/ttyS0')
+UART_BAUD = int(os.getenv('UART_BAUD', '115200'))
 
 # Video configuration
 WIDTH = 1280
@@ -39,12 +47,162 @@ QUEUE_MAX_BUFFERS = 0
 APPsrc_HIGH_WATERMARK = 128 * 1024  # bytes
 APPsrc_LOW_WATERMARK = 64 * 1024    # bytes
 
+class CarController:
+    """
+    Controls the RC car via UART based on commands from DataChannel
+    """
+    def __init__(self, uart_dev=UART_DEV, uart_baud=UART_BAUD):
+        self.uart_dev = uart_dev
+        self.uart_baud = uart_baud
+        self.ser = None
+        self.seq = 0
+        
+    def init_uart(self):
+        """Initialize UART connection"""
+        try:
+            self.ser = serial.Serial(self.uart_dev, self.uart_baud, timeout=0.1)
+            logger.info(f"UART initialized: {self.uart_dev} @ {self.uart_baud}")
+            time.sleep(0.2)
+            self.ser.reset_input_buffer()
+            self.ser.reset_output_buffer()
+            return True
+        except Exception as e:
+            logger.warning(f"UART not available: {e}. Running in video-only mode.")
+            return False
+    
+    def send_command(self, throttle, steer):
+        """Send command to ESP32 via UART"""
+        if not self.ser:
+            logger.warning("UART not available, cannot send command")
+            return
+        
+        self.seq = (self.seq + 1) & 0xFFFF
+        cmd = f"T,{int(throttle)},{int(steer)},0,{self.seq}\n"
+        
+        try:
+            self.ser.write(cmd.encode('ascii'))
+            self.ser.flush()
+            # Only log non-zero commands to reduce spam
+            if throttle != 0 or steer != 0:
+                logger.info(f"UART: T={throttle}, S={steer}")
+        except Exception as e:
+            logger.error(f"UART send error: {e}")
+    
+    def process_control_message(self, message):
+        """Process control message from DataChannel"""
+        try:
+            data = json.loads(message)
+            throttle = int(data.get('throttle', 0))
+            steer = int(data.get('steer', 0))
+            
+            # Clamp values to safe ranges
+            throttle = max(-300, min(300, throttle))
+            steer = max(-1000, min(1000, steer))
+            
+            self.send_command(throttle, steer)
+            
+        except json.JSONDecodeError:
+            logger.warning(f"Invalid JSON in control message: {message}")
+        except Exception as e:
+            logger.error(f"Error processing control message: {e}")
+    
+    def stop(self):
+        """Stop the car and close UART"""
+        if self.ser:
+            self.send_command(0, 0)
+            time.sleep(0.1)
+            self.ser.close()
+            logger.info("UART closed")
+
+
+async def run_control_subscriber(car_controller, control_session_id):
+    """
+    Separate PeerConnection to receive control DataChannel from browser
+    """
+    try:
+        logger.info(f"Setting up control subscriber for session: {control_session_id}")
+        
+        # Use Cloudflare /datachannels/establish API
+        url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/new"
+        headers = {
+            'Authorization': f'Bearer {CLOUDFLARE_APP_SECRET}',
+            'Content-Type': 'application/json'
+        }
+        
+        # Create our own session
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers) as response:
+                if response.status != 201:
+                    logger.error(f"Failed to create subscriber session: {await response.text()}")
+                    return None
+                data = await response.json()
+                subscriber_session_id = data['sessionId']
+                logger.info(f"Created subscriber session: {subscriber_session_id}")
+        
+        # Step 1: Establish DataChannel transport (like Cloudflare example)
+        establish_url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/{subscriber_session_id}/datachannels/establish"
+        establish_payload = {
+            'dataChannel': {
+                'location': 'remote',
+                'dataChannelName': 'server-events'
+            }
+        }
+        
+        logger.info(f"Establishing DataChannel transport...")
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(establish_url, headers=headers, json=establish_payload) as response:
+                response_text = await response.text()
+                logger.info(f"Establish transport response: {response_text}")
+                
+                if response.status not in [200, 201]:
+                    logger.error(f"Failed to establish transport: {response_text}")
+                    return None
+        
+        # Step 2: Subscribe to remote 'control' DataChannel from browser session
+        dc_new_url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/{subscriber_session_id}/datachannels/new"
+        dc_new_payload = {
+            'dataChannels': [
+                {
+                    'location': 'remote',
+                    'sessionId': control_session_id,
+                    'dataChannelName': 'control'
+                }
+            ]
+        }
+        
+        logger.info(f"Subscribing to control DataChannel from session {control_session_id}")
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(dc_new_url, headers=headers, json=dc_new_payload) as response:
+                response_text = await response.text()
+                logger.info(f"DataChannel subscription response: {response_text}")
+                
+                if response.status in [200, 201]:
+                    logger.info(f"Control DataChannel subscribed successfully")
+                else:
+                    logger.error(f"Failed to subscribe to DataChannel: {response_text}")
+                    return None
+        
+        # Note: In GStreamer implementation, we would need to handle WebRTC signaling
+        # For now, this sets up the Cloudflare side - full integration would require
+        # creating a separate webrtcbin element for the control channel
+        logger.warning("Control DataChannel subscribed on Cloudflare - full WebRTC integration TBD")
+        return subscriber_session_id
+        
+    except Exception as e:
+        logger.error(f"Error in control subscriber: {e}", exc_info=True)
+        return None
+
+
 class GStreamerWebRTC:
     def __init__(self):
         Gst.init(None)
         self.pipe = None
         self.webrtc = None
         self.session_id = None
+        self.car_controller = None
+        self.control_session_id = None
         self.fifo_path = '/tmp/h264_fifo'
         self.rpicam_process = None
         self.rpicam_restart_count = 0
@@ -420,10 +578,16 @@ class GStreamerWebRTC:
                 import os
                 if os.path.exists(self.fifo_path):
                     os.remove(self.fifo_path)
+            if self.car_controller:
+                self.car_controller.stop()
     
     def initialize(self):
         """Initialize pipeline (called from GLib idle)"""
         try:
+            # Initialize car controller
+            self.car_controller = CarController()
+            self.car_controller.init_uart()
+            
             # Create Cloudflare session
             self.create_cloudflare_session()
             
@@ -491,6 +655,9 @@ class GStreamerWebRTC:
 
             # Trigger negotiation only after caps are negotiated
             GLib.timeout_add(500, self.check_rtp_caps_ready)
+            
+            # Start polling for control session ID
+            GLib.timeout_add_seconds(2, self.check_control_session)
             
         except Exception as e:
             logger.error(f"Pipeline creation failed: {e}")
@@ -611,6 +778,38 @@ class GStreamerWebRTC:
             buf = Gst.Buffer.new_allocate(None, len(self.cached_pps), None)
             buf.fill(0, self.cached_pps)
             self.appsrc.emit('push-buffer', buf)
+    
+    def check_control_session(self):
+        """Poll signaling server for control session ID"""
+        if self.control_session_id:
+            return False  # Already got it, stop polling
+        
+        try:
+            import requests
+            url = f"{SIGNALING_SERVER}/api/control-session?id={self.session_id}"
+            response = requests.get(url, timeout=2)
+            if response.status_code == 200:
+                data = response.json()
+                control_session_id = data.get('controlSessionId')
+                if control_session_id:
+                    logger.info(f"Got control session ID: {control_session_id}")
+                    self.control_session_id = control_session_id
+                    # Setup control subscriber in separate thread
+                    threading.Thread(target=self.setup_control_subscriber, daemon=True).start()
+                    return False  # Stop polling
+        except Exception as e:
+            logger.debug(f"Polling for control session: {e}")
+        
+        return True  # Continue polling
+    
+    def setup_control_subscriber(self):
+        """Setup control subscriber in asyncio loop"""
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(run_control_subscriber(self.car_controller, self.control_session_id))
+        except Exception as e:
+            logger.error(f"Error setting up control subscriber: {e}", exc_info=True)
 
 def main():
     if not CLOUDFLARE_APP_ID or not CLOUDFLARE_APP_SECRET:
