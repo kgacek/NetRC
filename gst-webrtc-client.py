@@ -37,10 +37,10 @@ UART_DEV = os.getenv('UART_DEV', '/dev/ttyS0')
 UART_BAUD = int(os.getenv('UART_BAUD', '115200'))
 
 # Video configuration
-WIDTH = 1280
-HEIGHT = 720
+WIDTH = 960
+HEIGHT = 540
 FRAMERATE = 30
-BITRATE = 5000000  # 5 Mbps for 720p
+BITRATE = 3000000  # 3 Mbps for 540p
 
 # Low-latency tuning
 QUEUE_MAX_TIME_NS = 20_000_000  # 20 ms
