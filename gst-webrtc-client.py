@@ -98,7 +98,7 @@ class CarController:
             if throttle != 0 or steer != 0:
                 logger.info(f"Received control message: throttle={throttle}, steer={steer}")
             # Clamp values to safe ranges
-            throttle = max(-500, min(500, throttle))
+            throttle = max(-200, min(200, throttle))
             steer = max(-1000, min(1000, steer))
             
             self.send_command(throttle, steer)
