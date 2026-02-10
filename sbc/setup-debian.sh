@@ -69,7 +69,7 @@ sudo pip3 install --break-system-packages websockets
 
 # Enable serial port (disable console on serial)
 echo ""
-echo "[6/6] Configuring serial port..."
+echo "[6/7] Configuring serial port..."
 if [ -f /boot/cmdline.txt ]; then
     # Remove both possible console args for Zero/Zero 2 W
     sudo sed -i \
@@ -93,6 +93,33 @@ fi
 echo ""
 echo "Adding current user ($USER) to dialout group for serial port access..."
 sudo usermod -a -G dialout $USER
+
+# Configure DNS to prevent resolution issues
+echo ""
+echo "[7/7] Configuring DNS..."
+if systemctl is-active --quiet systemd-resolved; then
+    echo "Configuring systemd-resolved for reliable DNS..."
+    sudo mkdir -p /etc/systemd/resolved.conf.d/
+    cat <<EOF | sudo tee /etc/systemd/resolved.conf.d/dns.conf
+[Resolve]
+DNS=8.8.8.8 1.1.1.1
+FallbackDNS=1.0.0.1 8.8.4.4
+EOF
+    sudo systemctl restart systemd-resolved
+    echo "DNS configured via systemd-resolved"
+else
+    echo "Configuring static /etc/resolv.conf..."
+    # Remove symlink if exists
+    sudo rm -f /etc/resolv.conf
+    cat <<EOF | sudo tee /etc/resolv.conf
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+nameserver 1.0.0.1
+EOF
+    # Prevent overwriting
+    sudo chattr +i /etc/resolv.conf 2>/dev/null || true
+    echo "DNS configured via /etc/resolv.conf (immutable)"
+fi
 
 echo ""
 echo "===================================="

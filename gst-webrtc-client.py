@@ -20,7 +20,7 @@ import threading
 import serial
 import serial.tools.list_ports
 import asyncio
-import aiohttp
+import requests
 from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
 
 logging.basicConfig(level=logging.INFO)
@@ -137,15 +137,15 @@ async def run_control_subscriber(car_controller, control_session_id):
             'Content-Type': 'application/json'
         }
         
-        # Create our own session
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers) as response:
-                if response.status != 201:
-                    logger.error(f"Failed to create subscriber session: {await response.text()}")
-                    return None
-                data = await response.json()
-                subscriber_session_id = data['sessionId']
-                logger.info(f"Created subscriber session: {subscriber_session_id}")
+        # Create our own session - use requests (synchronous) for reliability
+        logger.info("Creating subscriber session...")
+        response = requests.post(url, headers=headers, timeout=10)
+        if response.status_code != 201:
+            logger.error(f"Failed to create subscriber session: {response.status_code} - {response.text}")
+            return None
+        data = response.json()
+        subscriber_session_id = data['sessionId']
+        logger.info(f"Created subscriber session: {subscriber_session_id}")
         
         # Step 1: Establish DataChannel transport (like Cloudflare example)
         establish_url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/{subscriber_session_id}/datachannels/establish"
@@ -158,56 +158,54 @@ async def run_control_subscriber(car_controller, control_session_id):
         
         logger.info(f"Establishing DataChannel transport...")
         
-        async with aiohttp.ClientSession() as session:
-            async with session.post(establish_url, headers=headers, json=establish_payload) as response:
-                response_text = await response.text()
-                logger.info(f"Establish transport response: {response_text}")
+        response = requests.post(establish_url, headers=headers, json=establish_payload, timeout=10)
+        response_text = response.text
+        logger.info(f"Establish transport response: {response_text}")
+        
+        if response.status_code in [200, 201]:
+            data = json.loads(response_text)
+            
+            if data.get('requiresImmediateRenegotiation'):
+                # We got an offer from Cloudflare, need to answer
+                await pc_control.setRemoteDescription(RTCSessionDescription(
+                    sdp=data['sessionDescription']['sdp'],
+                    type=data['sessionDescription']['type']
+                ))
+                logger.info("Received offer from Cloudflare, creating answer")
                 
-                if response.status in [200, 201]:
-                    data = json.loads(response_text)
-                    
-                    if data.get('requiresImmediateRenegotiation'):
-                        # We got an offer from Cloudflare, need to answer
-                        await pc_control.setRemoteDescription(RTCSessionDescription(
-                            sdp=data['sessionDescription']['sdp'],
-                            type=data['sessionDescription']['type']
-                        ))
-                        logger.info("Received offer from Cloudflare, creating answer")
-                        
-                        # Create answer
-                        answer = await pc_control.createAnswer()
-                        await pc_control.setLocalDescription(answer)
-                        
-                        # Wait for ICE gathering
-                        while pc_control.iceGatheringState != 'complete':
-                            await asyncio.sleep(0.1)
-                        
-                        # Send answer back to Cloudflare
-                        renegotiate_url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/{subscriber_session_id}/renegotiate"
-                        renegotiate_payload = {
-                            'sessionDescription': {
-                                'type': 'answer',
-                                'sdp': pc_control.localDescription.sdp
-                            }
-                        }
-                        
-                        async with aiohttp.ClientSession() as renegotiate_session:
-                            async with renegotiate_session.put(renegotiate_url, headers=headers, json=renegotiate_payload) as renegotiate_response:
-                                if renegotiate_response.status in [200, 201]:
-                                    logger.info("Transport renegotiation complete")
-                                else:
-                                    logger.error(f"Failed to send answer: {await renegotiate_response.text()}")
-                                    return None
-                    elif data.get('sessionDescription'):
-                        # Got answer from Cloudflare directly
-                        await pc_control.setRemoteDescription(RTCSessionDescription(
-                            sdp=data['sessionDescription']['sdp'],
-                            type=data['sessionDescription']['type']
-                        ))
-                        logger.info("Transport established")
+                # Create answer
+                answer = await pc_control.createAnswer()
+                await pc_control.setLocalDescription(answer)
+                
+                # Wait for ICE gathering
+                while pc_control.iceGatheringState != 'complete':
+                    await asyncio.sleep(0.1)
+                
+                # Send answer back to Cloudflare
+                renegotiate_url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/{subscriber_session_id}/renegotiate"
+                renegotiate_payload = {
+                    'sessionDescription': {
+                        'type': 'answer',
+                        'sdp': pc_control.localDescription.sdp
+                    }
+                }
+                
+                renegotiate_response = requests.put(renegotiate_url, headers=headers, json=renegotiate_payload, timeout=10)
+                if renegotiate_response.status_code in [200, 201]:
+                    logger.info("Transport renegotiation complete")
                 else:
-                    logger.error(f"Failed to establish transport: {response_text}")
+                    logger.error(f"Failed to send answer: {renegotiate_response.status_code} - {renegotiate_response.text}")
                     return None
+            elif data.get('sessionDescription'):
+                # Got answer from Cloudflare directly
+                await pc_control.setRemoteDescription(RTCSessionDescription(
+                    sdp=data['sessionDescription']['sdp'],
+                    type=data['sessionDescription']['type']
+                ))
+                logger.info("Transport established")
+        else:
+            logger.error(f"Failed to establish transport: {response.status_code} - {response_text}")
+            return None
         
         # Step 2: Subscribe to remote 'control' DataChannel from browser session
         dc_new_url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/{subscriber_session_id}/datachannels/new"
@@ -226,67 +224,70 @@ async def run_control_subscriber(car_controller, control_session_id):
         # Wait a bit for transport to be fully ready
         await asyncio.sleep(1)
         
-        async with aiohttp.ClientSession() as session:
-            async with session.post(dc_new_url, headers=headers, json=dc_new_payload) as response:
-                response_text = await response.text()
-                logger.info(f"DataChannel subscription response: {response_text}")
-                
-                if response.status in [200, 201]:
-                    data = json.loads(response_text)
-                    
-                    # Create negotiated DataChannel with ID from API
-                    dc_id = data['dataChannels'][0]['id']
-                    logger.info(f"Creating negotiated DataChannel with ID: {dc_id}")
-                    
-                    # Wait a bit before creating DataChannel to ensure transport is ready
-                    await asyncio.sleep(1)
-                    
-                    # Create negotiated DataChannel - this will trigger ondatachannel when connected
-                    control_dc = pc_control.createDataChannel('control-subscribed', negotiated=True, id=dc_id)
-                    logger.info(f"DataChannel object created: {control_dc}")
-                    logger.info(f"DataChannel readyState: {control_dc.readyState}")
-                    
-                    @control_dc.on('open')
-                    def on_open():
-                        logger.info(f"✓ Control DataChannel OPENED!")
-                    
-                    @control_dc.on('message')
-                    def on_message(message):
-                        logger.info(f"✓ Control DataChannel message received: {message[:50]}")
-                        if car_controller:
-                            car_controller.process_control_message(message)
-                    
-                    @control_dc.on('close')
-                    def on_close():
-                        logger.info("Control DataChannel closed")
-                        if car_controller:
-                            car_controller.send_command(0, 0)
-                    
-                    @control_dc.on('error')
-                    def on_error(error):
-                        logger.error(f"✗ Control DataChannel error: {error}")
-                    
-                    # Monitor connection state
-                    @pc_control.on('connectionstatechange')
-                    async def on_connectionstatechange():
-                        logger.info(f"Control PC connectionState: {pc_control.connectionState}")
-                        if pc_control.connectionState in ['failed', 'closed']:
-                            logger.warning("Control connection failed or closed")
-                            if car_controller:
-                                car_controller.send_command(0, 0)
-                    
-                    @pc_control.on('iceconnectionstatechange')
-                    async def on_iceconnectionstatechange():
-                        logger.info(f"Control PC iceConnectionState: {pc_control.iceConnectionState}")
-                    
-                    # Wait a bit to see if DataChannel opens
-                    await asyncio.sleep(2)
-                    logger.info(f"After 2s, DataChannel readyState: {control_dc.readyState}")
-                    
-                    logger.info(f"Control DataChannel subscribed successfully")
-                else:
-                    logger.error(f"Failed to subscribe to DataChannel: {response_text}")
-                    return None
+        response = requests.post(dc_new_url, headers=headers, json=dc_new_payload, timeout=10)
+        response_text = response.text
+        logger.info(f"DataChannel subscription response: {response_text}")
+        
+        if response.status_code in [200, 201]:
+            data = json.loads(response_text)
+            
+            # Create negotiated DataChannel with ID from API
+            dc_id = data['dataChannels'][0]['id']
+            logger.info(f"Creating negotiated DataChannel with ID: {dc_id}")
+            
+            # Wait a bit before creating DataChannel to ensure transport is ready
+            await asyncio.sleep(1)
+            
+            # Create negotiated DataChannel - this will trigger ondatachannel when connected
+            control_dc = pc_control.createDataChannel('control-subscribed', negotiated=True, id=dc_id)
+            logger.info(f"DataChannel object created: {control_dc}")
+            logger.info(f"DataChannel readyState: {control_dc.readyState}")
+            
+            @control_dc.on('open')
+            def on_open():
+                logger.info(f"✓ Control DataChannel OPENED!")
+            
+            @control_dc.on('open')
+            def on_open():
+                logger.info(f"✓ Control DataChannel OPENED!")
+            
+            @control_dc.on('message')
+            def on_message(message):
+                logger.info(f"✓ Control DataChannel message received: {message[:50]}")
+                if car_controller:
+                    car_controller.process_control_message(message)
+            
+            @control_dc.on('close')
+            def on_close():
+                logger.info("Control DataChannel closed")
+                if car_controller:
+                    car_controller.send_command(0, 0)
+            
+            @control_dc.on('error')
+            def on_error(error):
+                logger.error(f"✗ Control DataChannel error: {error}")
+            
+            # Monitor connection state
+            @pc_control.on('connectionstatechange')
+            async def on_connectionstatechange():
+                logger.info(f"Control PC connectionState: {pc_control.connectionState}")
+                if pc_control.connectionState in ['failed', 'closed']:
+                    logger.warning("Control connection failed or closed")
+                    if car_controller:
+                        car_controller.send_command(0, 0)
+            
+            @pc_control.on('iceconnectionstatechange')
+            async def on_iceconnectionstatechange():
+                logger.info(f"Control PC iceConnectionState: {pc_control.iceConnectionState}")
+            
+            # Wait a bit to see if DataChannel opens
+            await asyncio.sleep(2)
+            logger.info(f"After 2s, DataChannel readyState: {control_dc.readyState}")
+            
+            logger.info(f"Control DataChannel subscribed successfully")
+        else:
+            logger.error(f"Failed to subscribe to DataChannel: {response.status_code} - {response_text}")
+            return None
         
         return pc_control
         
