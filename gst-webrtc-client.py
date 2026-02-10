@@ -233,7 +233,8 @@ async def run_control_subscriber(car_controller, control_session_id):
             
             # Create negotiated DataChannel with ID from API
             dc_id = data['dataChannels'][0]['id']
-            logger.info(f"Creating negotiated DataChannel with ID: {dc_id}")
+            logger.info(f">>> RPi subscribing to remote DataChannel with ID: {dc_id}")
+            logger.info(f">>> Browser should have created local DataChannel with same ID: {dc_id}")
             
             # Wait a bit before creating DataChannel to ensure transport is ready
             await asyncio.sleep(1)
@@ -242,18 +243,16 @@ async def run_control_subscriber(car_controller, control_session_id):
             control_dc = pc_control.createDataChannel('control-subscribed', negotiated=True, id=dc_id)
             logger.info(f"DataChannel object created: {control_dc}")
             logger.info(f"DataChannel readyState: {control_dc.readyState}")
+            logger.info(f"DataChannel label: {control_dc.label}")
             
             @control_dc.on('open')
             def on_open():
-                logger.info(f"✓ Control DataChannel OPENED!")
-            
-            @control_dc.on('open')
-            def on_open():
-                logger.info(f"✓ Control DataChannel OPENED!")
+                logger.info(f"✓✓✓ Control DataChannel OPENED! ✓✓✓")
+                logger.info(f"ReadyState: {control_dc.readyState}, Label: {control_dc.label}, ID: {control_dc.id}")
             
             @control_dc.on('message')
             def on_message(message):
-                logger.info(f"✓ Control DataChannel message received: {message[:50]}")
+                logger.info(f"✓ RECEIVED: {message[:100]}")
                 if car_controller:
                     car_controller.process_control_message(message)
             
@@ -321,33 +320,6 @@ class GStreamerWebRTC:
         self.cached_pps = None
         self.sps_pps_needed = False
         self.drop_count = 0
-        
-    def create_cloudflare_session(self):
-        """Create new Cloudflare session"""
-        import requests
-        
-        url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/new"
-        headers = {'Authorization': f'Bearer {CLOUDFLARE_APP_SECRET}'}
-        
-        response = requests.post(url, headers=headers, timeout=10)
-        if response.status_code != 201:
-            raise Exception(f"Failed to create session: {response.status_code}")
-        
-        data = response.json()
-        self.session_id = data['sessionId']
-        logger.info(f"Session created: {self.session_id}")
-        
-        # Register with signaling server
-        try:
-            response = requests.post(
-                f"{SIGNALING_SERVER}/api/publish",
-                json={'sessionId': self.session_id},
-                timeout=5
-            )
-            if response.status_code == 200:
-                logger.info("Session registered with signaling server")
-        except Exception as e:
-            logger.warning(f"Failed to register with signaling server: {e}")
     
     def create_pipeline(self):
         """Create GStreamer pipeline reading from rpicam-vid hardware encoder via FIFO"""
@@ -467,6 +439,33 @@ class GStreamerWebRTC:
         """Send offer to Cloudflare Calls API (synchronous)"""
         import requests
         
+        # Create session NOW, right before sending offer
+        if not self.session_id:
+            logger.info("Creating Cloudflare session...")
+            url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/new"
+            headers = {'Authorization': f'Bearer {CLOUDFLARE_APP_SECRET}'}
+            
+            response = requests.post(url, headers=headers, timeout=10)
+            if response.status_code != 201:
+                logger.error(f"Failed to create session: {response.status_code}")
+                return
+            
+            data = response.json()
+            self.session_id = data['sessionId']
+            logger.info(f"Session created: {self.session_id}")
+            
+            # Register with signaling server
+            try:
+                response = requests.post(
+                    f"{SIGNALING_SERVER}/api/publish",
+                    json={'sessionId': self.session_id},
+                    timeout=5
+                )
+                if response.status_code == 200:
+                    logger.info("Session registered with signaling server")
+            except Exception as e:
+                logger.warning(f"Failed to register with signaling server: {e}")
+        
         logger.info("Sending offer to Cloudflare...")
         logger.info(f"Offer SDP:\n{offer_sdp}")
         
@@ -516,6 +515,16 @@ class GStreamerWebRTC:
             
             data = response.json()
             logger.info("Received answer from Cloudflare")
+            
+            # Print session info on first successful connection
+            if not hasattr(self, '_session_info_printed'):
+                print(f"\n{'='*60}")
+                print(f"SESSION ID: {self.session_id}")
+                print(f"Signaling Server: {SIGNALING_SERVER}")
+                print(f"Use this Session ID in the browser to connect!")
+                print(f"Or browse to {SIGNALING_SERVER} to see available sessions")
+                print(f"{'='*60}\n")
+                self._session_info_printed = True
             
             # Set remote description
             answer_sdp = data['sessionDescription']['sdp']
@@ -698,8 +707,8 @@ class GStreamerWebRTC:
             self.car_controller = CarController()
             self.car_controller.init_uart()
             
-            # Create Cloudflare session
-            self.create_cloudflare_session()
+            # Don't create Cloudflare session yet - wait until we're ready to send offer
+            # This prevents session timeout
             
             # Ensure FIFO exists before starting rpicam and pipeline
             self.ensure_fifo()

@@ -13,10 +13,25 @@ from urllib.parse import urlparse, parse_qs
 sessions = {}
 
 class SignalingHandler(BaseHTTPRequestHandler):
+    # Suppress logging of errors
+    def log_error(self, format, *args):
+        # Only log actual application errors, not connection errors
+        if args and isinstance(args[0], int) and args[0] in [400, 404]:
+            return  # Suppress 400/404 logs
+        super().log_error(format, *args)
+    
     def _send_cors_headers(self):
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+    
+    def _safe_send(self, data):
+        """Safely send data, catching BrokenPipeError"""
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            # Client disconnected before receiving response - this is normal
+            pass
     
     def do_OPTIONS(self):
         self.send_response(200)
@@ -41,7 +56,7 @@ class SignalingHandler(BaseHTTPRequestHandler):
             self._send_cors_headers()
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
-            self.wfile.write(json.dumps({'success': True}).encode())
+            self._safe_send(json.dumps({'success': True}).encode())
             print(f"Publisher registered: {session_id}")
         
         elif self.path == '/api/control':
@@ -60,7 +75,7 @@ class SignalingHandler(BaseHTTPRequestHandler):
                 self._send_cors_headers()
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()
-                self.wfile.write(json.dumps({'success': True}).encode())
+                self._safe_send(json.dumps({'success': True}).encode())
             else:
                 self.send_response(404)
                 self._send_cors_headers()
@@ -85,7 +100,7 @@ class SignalingHandler(BaseHTTPRequestHandler):
             self._send_cors_headers()
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
-            self.wfile.write(json.dumps(active_sessions).encode())
+            self._safe_send(json.dumps(active_sessions).encode())
         
         elif parsed_path.path == '/api/session':
             query = parse_qs(parsed_path.query)
@@ -96,7 +111,7 @@ class SignalingHandler(BaseHTTPRequestHandler):
                 self._send_cors_headers()
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()
-                self.wfile.write(json.dumps(sessions[session_id]).encode())
+                self._safe_send(json.dumps(sessions[session_id]).encode())
             else:
                 self.send_response(404)
                 self._send_cors_headers()
@@ -114,13 +129,13 @@ class SignalingHandler(BaseHTTPRequestHandler):
                     self._send_cors_headers()
                     self.send_header('Content-Type', 'application/json')
                     self.end_headers()
-                    self.wfile.write(json.dumps({'controlSessionId': control_session_id}).encode())
+                    self._safe_send(json.dumps({'controlSessionId': control_session_id}).encode())
                 else:
                     self.send_response(404)
                     self._send_cors_headers()
                     self.send_header('Content-Type', 'application/json')
                     self.end_headers()
-                    self.wfile.write(json.dumps({'error': 'No control session'}).encode())
+                    self._safe_send(json.dumps({'error': 'No control session'}).encode())
             else:
                 self.send_response(404)
                 self._send_cors_headers()
