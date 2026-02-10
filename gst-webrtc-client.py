@@ -95,9 +95,10 @@ class CarController:
             data = json.loads(message)
             throttle = int(data.get('throttle', 0))
             steer = int(data.get('steer', 0))
-            
+            if throttle != 0 or steer != 0:
+                logger.info(f"Received control message: throttle={throttle}, steer={steer}")
             # Clamp values to safe ranges
-            throttle = max(-300, min(300, throttle))
+            throttle = max(-500, min(500, throttle))
             steer = max(-1000, min(1000, steer))
             
             self.send_command(throttle, steer)
@@ -252,7 +253,6 @@ async def run_control_subscriber(car_controller, control_session_id):
             
             @control_dc.on('message')
             def on_message(message):
-                logger.info(f"✓ RECEIVED: {message[:100]}")
                 if car_controller:
                     car_controller.process_control_message(message)
             
