@@ -555,8 +555,8 @@
                         console.log('Control session registered with signaling server');
                         
                         // Wait for RPi to complete its subscription
-                        console.log('Waiting 2s for RPi to subscribe...');
-                        await new Promise(resolve => setTimeout(resolve, 2000));
+                        console.log('Waiting 4s for RPi to subscribe...');
+                        await new Promise(resolve => setTimeout(resolve, 4000));
                         
                     } catch (e) {
                         console.warn('Could not register control session:', e);
