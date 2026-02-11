@@ -354,10 +354,8 @@ class GStreamerWebRTC:
         self.webrtc.connect('notify::ice-gathering-state', self.on_ice_gathering_state)
         self.webrtc.connect('pad-added', self.on_webrtc_pad_added)
         
-        # Add transceiver with SENDONLY direction (Cloudflare expects sendonly, not sendrecv)
-        caps = Gst.Caps.from_string("application/x-rtp,media=video,encoding-name=H264,payload=96")
-        self.transceiver = self.webrtc.emit('add-transceiver', GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY, caps)
-        logger.info(f"Added SENDONLY video transceiver: {self.transceiver}")
+        # Don't manually add transceiver - let rtph264pay create it automatically
+        # Then we'll set direction to SENDONLY in on_webrtc_pad_added
         
         # Flag to track if negotiation has been started
         self.negotiation_started = False
@@ -406,6 +404,17 @@ class GStreamerWebRTC:
     def on_webrtc_pad_added(self, element, pad):
         """Called when pad is added to webrtcbin - trigger negotiation"""
         logger.info(f"WebRTC pad added: {pad.get_name()}, caps: {pad.get_current_caps()}")
+        
+        # Set transceiver direction to SENDONLY (Cloudflare expects sendonly)
+        # Get all transceivers
+        transceivers = self.webrtc.emit('get-transceivers')
+        logger.info(f"Number of transceivers: {len(transceivers)}")
+        for idx, transceiver in enumerate(transceivers):
+            # Set direction to SENDONLY for video transceivers
+            current_dir = transceiver.get_property('direction')
+            logger.info(f"Transceiver {idx}: current direction = {current_dir}")
+            transceiver.set_property('direction', GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY)
+            logger.info(f"Transceiver {idx}: set to SENDONLY")
         
         # Trigger negotiation once when first pad is added (means rtph264pay connected)
         if not self.negotiation_started:
