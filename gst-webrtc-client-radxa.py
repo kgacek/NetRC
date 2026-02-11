@@ -322,10 +322,14 @@ class GStreamerWebRTC:
         self.drop_count = 0
     
     def create_pipeline(self):
-        """Create GStreamer pipeline reading from rpicam-vid hardware encoder via TCP"""
-        # Use tcpserversrc to read from gst-launch via TCP socket (avoids FIFO deadlock)
+        """Create GStreamer pipeline with v4l2src directly (no subprocess)"""
+        # Single pipeline: v4l2 → encoder → rtph264pay → webrtcbin
         pipeline_str = f"""
-        tcpserversrc host=127.0.0.1 port=5000 !
+        v4l2src device=/dev/video0 !
+        video/x-raw,format=NV12,width={WIDTH},height={HEIGHT},framerate={FRAMERATE}/1 !
+        videoconvert !
+        video/x-raw,format=I420 !
+        mpph264enc bps={BITRATE} bps-max={BITRATE} gop={FRAMERATE} rc-mode=cbr profile=baseline header-mode=each-idr !
         h264parse !
         video/x-h264,stream-format=avc,alignment=au,profile=baseline !
         rtph264pay pt=96 mtu=1200 config-interval=1 aggregate-mode=zero-latency !
@@ -722,23 +726,13 @@ class GStreamerWebRTC:
             # Don't create Cloudflare session yet - wait until we're ready to send offer
             # This prevents session timeout
 
-            # Start pipeline FIRST (tcpserversrc will listen on port 5000)
+            # Create pipeline directly (no subprocess needed!)
             self.create_and_start_pipeline()
-            
-            # Then start gst-launch (tcpclientsink will connect to port 5000)
-            # Wait 1 second for tcpserversrc to start listening
-            logger.info("Starting gst-launch in 1 second...")
-            GLib.timeout_add(1000, self._delayed_start_rpicam)
         except Exception as e:
             logger.error(f"Initialization failed: {e}")
             self.main_loop.quit()
         
         return False  # Don't repeat idle callback
-    
-    def _delayed_start_rpicam(self):
-        """Start gst-launch after tcpserversrc is ready"""
-        self.start_rpicam()
-        return False  # Don't repeat
     
     def start_rpicam(self):
         """Start v4l2src with Rockchip MPP encoder (replaces rpicam-vid)"""
@@ -784,7 +778,7 @@ class GStreamerWebRTC:
         return True
     
     def create_and_start_pipeline(self):
-        """Create and start GStreamer pipeline (called after rpicam-vid delay)"""
+        """Create and start GStreamer pipeline"""
         try:
             # Create pipeline
             self.create_pipeline()
@@ -792,10 +786,7 @@ class GStreamerWebRTC:
             # Start pipeline
             self.start_pipeline()
             
-            logger.info("Pipeline started successfully! tcpserversrc listening on port 5000...")
-
-            # Start monitoring gst-launch process (check every 2 seconds)
-            GLib.timeout_add_seconds(2, self.monitor_rpicam)
+            logger.info("Pipeline started successfully with v4l2src!")
 
             # Trigger negotiation only after caps are negotiated
             GLib.timeout_add(500, self.check_rtp_caps_ready)
