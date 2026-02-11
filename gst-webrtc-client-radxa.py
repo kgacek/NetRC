@@ -427,6 +427,12 @@ class GStreamerWebRTC:
         self.webrtc.connect('notify::connection-state', self.on_connection_state)
         self.webrtc.connect('pad-added', self.on_webrtc_pad_added)
 
+        # Watch bus messages for DTLS/SRTP/ICE issues
+        bus = self.pipe.get_bus()
+        if bus:
+            bus.add_signal_watch()
+            bus.connect('message', self.on_bus_message)
+
         # Configure TURN if provided
         turn_url = TURN_URL
         turn_user, turn_pass = (TURN_USER, TURN_PASS)
@@ -576,6 +582,25 @@ class GStreamerWebRTC:
         """Monitor overall WebRTC connection state"""
         state = element.get_property('connection-state')
         logger.info(f"WebRTC connection state: {state}")
+
+    def on_bus_message(self, bus, message):
+        mtype = message.type
+        if mtype == Gst.MessageType.ERROR:
+            err, debug = message.parse_error()
+            logger.error(f"GST ERROR: {err} ({debug})")
+        elif mtype == Gst.MessageType.WARNING:
+            err, debug = message.parse_warning()
+            logger.warning(f"GST WARNING: {err} ({debug})")
+        elif mtype == Gst.MessageType.ELEMENT:
+            s = message.get_structure()
+            if not s:
+                return
+            name = s.get_name()
+            if any(k in name.lower() for k in ["dtls", "srtp", "ice", "webrtc", "nice"]):
+                try:
+                    logger.info(f"GST ELEMENT: {name} {s.to_string()}")
+                except Exception:
+                    logger.info(f"GST ELEMENT: {name}")
     
     def send_offer_to_cloudflare(self, offer_sdp):
         """Send offer to Cloudflare Calls API (synchronous)"""
