@@ -406,21 +406,25 @@ class GStreamerWebRTC:
         set_promise = Gst.Promise.new()
         element.emit('set-local-description', offer, set_promise)
         
-        # With Cloudflare ice-lite, we still wait for ICE gathering to settle to avoid race
-        sdp = offer.sdp.as_text()
-        # Force sendonly to avoid SFU treating this as recv-capable
-        if "a=sendrecv" in sdp:
-            sdp = sdp.replace("a=sendrecv\r\n", "a=sendonly\r\n")
-            sdp = sdp.replace("a=sendrecv\n", "a=sendonly\n")
-
+        # Wait for ICE gathering and then use local-description SDP (includes candidates)
         def _send_when_ice_ready():
             logger.info("Waiting for ICE gathering to complete before sending offer...")
-            deadline = time.monotonic() + 3.0
+            deadline = time.monotonic() + 5.0
             while time.monotonic() < deadline:
                 state = self.webrtc.get_property('ice-gathering-state')
                 if state == GstWebRTC.WebRTCICEGatheringState.COMPLETE:
                     break
                 time.sleep(0.05)
+
+            # Use local-description SDP (should contain a=candidate for non-trickle)
+            local_desc = self.webrtc.get_property('local-description')
+            sdp = local_desc.sdp.as_text() if local_desc else offer.sdp.as_text()
+
+            # Force sendonly to avoid SFU treating this as recv-capable
+            if "a=sendrecv" in sdp:
+                sdp = sdp.replace("a=sendrecv\r\n", "a=sendonly\r\n")
+                sdp = sdp.replace("a=sendrecv\n", "a=sendonly\n")
+
             logger.info("Sending offer to Cloudflare (ice-lite mode)...")
             self.send_offer_to_cloudflare(sdp)
 
