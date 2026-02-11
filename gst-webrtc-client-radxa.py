@@ -393,16 +393,26 @@ class GStreamerWebRTC:
         set_promise = Gst.Promise.new()
         element.emit('set-local-description', offer, set_promise)
         
-        # With Cloudflare ice-lite, send offer immediately without waiting for ICE gathering
-        # Server will provide ICE candidates in the answer
-        logger.info("Sending offer to Cloudflare (ice-lite mode)...")
+        # With Cloudflare ice-lite, we still wait for ICE gathering to settle to avoid race
         sdp = offer.sdp.as_text()
         # Force sendonly to avoid SFU treating this as recv-capable
         if "a=sendrecv" in sdp:
             sdp = sdp.replace("a=sendrecv\r\n", "a=sendonly\r\n")
             sdp = sdp.replace("a=sendrecv\n", "a=sendonly\n")
+
+        def _send_when_ice_ready():
+            logger.info("Waiting for ICE gathering to complete before sending offer...")
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                state = self.webrtc.get_property('ice-gathering-state')
+                if state == GstWebRTC.WebRTCICEGatheringState.COMPLETE:
+                    break
+                time.sleep(0.05)
+            logger.info("Sending offer to Cloudflare (ice-lite mode)...")
+            self.send_offer_to_cloudflare(sdp)
+
         import threading
-        threading.Thread(target=self.send_offer_to_cloudflare, args=(sdp,), daemon=True).start()
+        threading.Thread(target=_send_when_ice_ready, daemon=True).start()
     
     def on_ice_candidate(self, element, mlineindex, candidate):
         """Handle ICE candidate - not needed with ice-lite server"""
