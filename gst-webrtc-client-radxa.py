@@ -397,6 +397,10 @@ class GStreamerWebRTC:
         # Server will provide ICE candidates in the answer
         logger.info("Sending offer to Cloudflare (ice-lite mode)...")
         sdp = offer.sdp.as_text()
+        # Force sendonly to avoid SFU treating this as recv-capable
+        if "a=sendrecv" in sdp:
+            sdp = sdp.replace("a=sendrecv\r\n", "a=sendonly\r\n")
+            sdp = sdp.replace("a=sendrecv\n", "a=sendonly\n")
         import threading
         threading.Thread(target=self.send_offer_to_cloudflare, args=(sdp,), daemon=True).start()
     
