@@ -615,7 +615,20 @@ class GStreamerWebRTC:
             stats = reply.get_value('stats') if reply else None
             if not stats:
                 logger.info("WebRTC stats empty")
-                return
+                # Try pad-specific stats as a fallback
+                try:
+                    pad = self._get_webrtc_any_pad()
+                    if pad:
+                        p = Gst.Promise.new()
+                        self.webrtc.emit('get-stats', pad, p)
+                        p.wait()
+                        r = p.get_reply()
+                        stats = r.get_value('stats') if r else None
+                except Exception:
+                    stats = None
+
+                if not stats:
+                    return
 
             stats_str = stats.to_string()
             match = re.search(r'bytesSent=(\d+)', stats_str)
@@ -625,6 +638,31 @@ class GStreamerWebRTC:
                 logger.info(f"WebRTC stats (no bytesSent found): {stats_str}")
         except Exception as e:
             logger.debug(f"Stats parsing error: {e}")
+
+    def _get_webrtc_any_pad(self):
+        """Return any src/sink pad from webrtcbin for stats"""
+        try:
+            it = self.webrtc.iterate_src_pads()
+            while True:
+                ok, pad = it.next()
+                if ok and pad:
+                    return pad
+                if not ok:
+                    break
+        except Exception:
+            pass
+
+        try:
+            it = self.webrtc.iterate_sink_pads()
+            while True:
+                ok, pad = it.next()
+                if ok and pad:
+                    return pad
+                if not ok:
+                    break
+        except Exception:
+            pass
+        return None
     
     def start_pipeline(self):
         """Start the GStreamer pipeline"""
