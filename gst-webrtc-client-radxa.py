@@ -33,6 +33,11 @@ CLOUDFLARE_APP_SECRET = os.getenv('CF_REALTIME_TOKEN')
 CLOUDFLARE_API_BASE = 'https://rtc.live.cloudflare.com/v1'
 SIGNALING_SERVER = os.getenv('SIGNALING_SERVER', 'https://79-76-127-159.nip.io')
 
+# TURN configuration (optional)
+TURN_URL = os.getenv('TURN_URL')
+TURN_USER = os.getenv('TURN_USER')
+TURN_PASS = os.getenv('TURN_PASS')
+
 # UART configuration for car control
 UART_DEV = os.getenv('UART_DEV', '/dev/ttyS0')
 UART_BAUD = int(os.getenv('UART_BAUD', '115200'))
@@ -362,6 +367,15 @@ class GStreamerWebRTC:
         self.webrtc.connect('notify::connection-state', self.on_connection_state)
         self.webrtc.connect('pad-added', self.on_webrtc_pad_added)
 
+        # Configure TURN if provided
+        if TURN_URL and TURN_USER and TURN_PASS:
+            try:
+                turn_uri = f"turn://{TURN_USER}:{TURN_PASS}@{TURN_URL}"
+                self.webrtc.set_property('turn-server', turn_uri)
+                logger.info("webrtcbin TURN server configured")
+            except Exception as e:
+                logger.warning(f"Failed to set TURN server: {e}")
+
         # Prefer non-trickle ICE so candidates are embedded in SDP
         try:
             self.webrtc.set_property('trickle-ice', False)
@@ -522,6 +536,8 @@ class GStreamerWebRTC:
         logger.info(f"Offer SDP:\n{offer_sdp}")
         if "a=candidate" not in offer_sdp:
             logger.warning("Offer SDP contains no ICE candidates (SFU may not receive media)")
+        if "typ srflx" not in offer_sdp and "typ relay" not in offer_sdp:
+            logger.warning("No srflx/relay candidates in SDP (NAT traversal may fail without TURN)")
         
         # Extract video mid - GStreamer webrtcbin always uses mid=0 for first track
         video_mid = "0"
