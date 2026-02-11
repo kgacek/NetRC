@@ -722,18 +722,23 @@ class GStreamerWebRTC:
             # Don't create Cloudflare session yet - wait until we're ready to send offer
             # This prevents session timeout
 
-            # Start gst-launch first (will connect to tcpserversrc)
-            self.start_rpicam()
+            # Start pipeline FIRST (tcpserversrc will listen on port 5000)
+            self.create_and_start_pipeline()
             
-            # Schedule pipeline creation after gst-launch initializes
-            # tcpserversrc will wait for tcpclientsink to connect
-            logger.info("Scheduling pipeline creation in 2 seconds...")
-            GLib.timeout_add(2000, self.create_and_start_pipeline)
+            # Then start gst-launch (tcpclientsink will connect to port 5000)
+            # Wait 1 second for tcpserversrc to start listening
+            logger.info("Starting gst-launch in 1 second...")
+            GLib.timeout_add(1000, self._delayed_start_rpicam)
         except Exception as e:
             logger.error(f"Initialization failed: {e}")
             self.main_loop.quit()
         
         return False  # Don't repeat idle callback
+    
+    def _delayed_start_rpicam(self):
+        """Start gst-launch after tcpserversrc is ready"""
+        self.start_rpicam()
+        return False  # Don't repeat
     
     def start_rpicam(self):
         """Start v4l2src with Rockchip MPP encoder (replaces rpicam-vid)"""
@@ -787,9 +792,7 @@ class GStreamerWebRTC:
             # Start pipeline
             self.start_pipeline()
             
-            logger.info("Pipeline started successfully!")
-
-            # filesrc reads FIFO directly - no need for FIFO reader thread
+            logger.info("Pipeline started successfully! tcpserversrc listening on port 5000...")
 
             # Start monitoring gst-launch process (check every 2 seconds)
             GLib.timeout_add_seconds(2, self.monitor_rpicam)
