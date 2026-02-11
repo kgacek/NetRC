@@ -625,7 +625,15 @@ class GStreamerWebRTC:
         if elapsed > 0:
             fps = self.fps_count / elapsed
             rtp_count = getattr(self, 'rtp_packet_count', 0)
-            logger.info(f"Measured H264 FPS: {fps:.1f}, RTP packets/sec: {rtp_count}")
+            
+            # Check appsrc state
+            if self.appsrc:
+                level = self.appsrc.get_property('current-level-bytes')
+                state = self.appsrc.get_state(0)[1]  # current state
+                logger.info(f"H264 FPS: {fps:.1f}, RTP pps: {rtp_count}, appsrc: {level} bytes, state: {state}")
+            else:
+                logger.info(f"H264 FPS: {fps:.1f}, RTP pps: {rtp_count}")
+            
             self.rtp_packet_count = 0
                     
         self.fps_count = 0
