@@ -846,11 +846,19 @@ class GStreamerWebRTC:
             return
 
         nal_type = nal[sc_len] & 0x1F
-
+        
+        # Count NAL types
+        if not hasattr(self, 'nal_counts'):
+            self.nal_counts = {}
+            self.nal_push_count = 0
+        self.nal_counts[nal_type] = self.nal_counts.get(nal_type, 0) + 1
+        
         if nal_type == 7:
             self.cached_sps = nal
+            logger.info(f"Cached SPS (type 7), size={len(nal)}")
         elif nal_type == 8:
             self.cached_pps = nal
+            logger.info(f"Cached PPS (type 8), size={len(nal)}")
 
         # Drop strategy when appsrc is backlogged: skip non-IDR slices until next IDR
         level_bytes = self.appsrc.get_property('current-level-bytes')
@@ -876,8 +884,13 @@ class GStreamerWebRTC:
         buf = Gst.Buffer.new_allocate(None, len(nal), None)
         buf.fill(0, nal)
         ret = self.appsrc.emit('push-buffer', buf)
+        self.nal_push_count += 1
+        
+        if self.nal_push_count % 50 == 0:
+            logger.info(f"Pushed {self.nal_push_count} NALs to appsrc. Types: {self.nal_counts}. Return: {ret}")
+        
         if ret != Gst.FlowReturn.OK:
-            logger.debug(f"appsrc push-buffer returned {ret}")
+            logger.warning(f"appsrc push-buffer returned {ret} for NAL type {nal_type}")
 
     def _push_cached_parameter_sets(self):
         """Push cached SPS/PPS before IDR if available"""
