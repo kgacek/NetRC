@@ -311,24 +311,27 @@ class GStreamerWebRTC:
         # v4l2src (NV12) -> videoconvert -> I420 -> mpph264enc (hardware)
         # Note: Direct NV12->mpph264enc causes RGA errors, need I420 conversion
         
+        # Build pipeline without linking to webrtcbin (will link manually after transceiver)
         pipeline_str = f"""
-        webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.cloudflare.com:3478
-        v4l2src device=/dev/video0 !
+        v4l2src device=/dev/video0 name=src !
         video/x-raw,format=NV12,width={WIDTH},height={HEIGHT},framerate={FRAMERATE}/1 !
         videoconvert !
         video/x-raw,format=I420 !
         queue leaky=downstream max-size-time={QUEUE_MAX_TIME_NS} max-size-bytes=0 max-size-buffers={QUEUE_MAX_BUFFERS} !
         mpph264enc bps={BITRATE} bps-max={BITRATE} gop={FRAMERATE} rc-mode=cbr profile=baseline header-mode=each-idr !
         h264parse config-interval=1 !
-        video/x-h264,stream-format=avc,alignment=au,profile=baseline !
-        rtph264pay pt=96 mtu=1200 config-interval=1 aggregate-mode=zero-latency !
-        sendrecv.
+        video/x-h264,stream-format=avc,alignment=au !
+        rtph264pay name=pay pt=96 mtu=1200 config-interval=1 aggregate-mode=zero-latency
         """
         
         logger.info("Creating GStreamer pipeline (Radxa Zero 3W with Rockchip MPP)")
         self.pipe = Gst.parse_launch(pipeline_str)
         
-        self.webrtc = self.pipe.get_by_name('sendrecv')
+        # Create webrtcbin separately
+        self.webrtc = Gst.ElementFactory.make('webrtcbin', 'sendrecv')
+        self.webrtc.set_property('bundle-policy', GstWebRTC.WebRTCBundlePolicy.MAX_BUNDLE)
+        self.webrtc.set_property('stun-server', 'stun://stun.cloudflare.com:3478')
+        self.pipe.add(self.webrtc)
         
         # Connect signals
         self.webrtc.connect('on-negotiation-needed', self.on_negotiation_needed)
@@ -340,6 +343,13 @@ class GStreamerWebRTC:
         caps = Gst.Caps.from_string("application/x-rtp,media=video,encoding-name=H264,payload=96")
         self.transceiver = self.webrtc.emit('add-transceiver', GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY, caps)
         logger.info(f"Added video transceiver: {self.transceiver}")
+        
+        # Now link rtph264pay to webrtcbin
+        pay = self.pipe.get_by_name('pay')
+        pay_src = pay.get_static_pad('src')
+        webrtc_sink = self.webrtc.get_request_pad('sink_0')
+        pay_src.link(webrtc_sink)
+        logger.info("Linked rtph264pay to webrtcbin")
         
         # Setup FPS monitoring
         self.setup_fps_probe()
