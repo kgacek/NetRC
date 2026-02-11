@@ -361,6 +361,13 @@ class GStreamerWebRTC:
         self.webrtc.connect('notify::ice-gathering-state', self.on_ice_gathering_state)
         self.webrtc.connect('notify::connection-state', self.on_connection_state)
         self.webrtc.connect('pad-added', self.on_webrtc_pad_added)
+
+        # Prefer non-trickle ICE so candidates are embedded in SDP
+        try:
+            self.webrtc.set_property('trickle-ice', False)
+            logger.info("webrtcbin trickle-ice disabled (embed candidates in SDP)")
+        except Exception:
+            logger.info("webrtcbin trickle-ice property not available")
         
         # Let webrtcbin create a single transceiver from the linked RTP pad.
         # Explicit add-transceiver can create a second m=video section and confuse SFU.
@@ -509,6 +516,8 @@ class GStreamerWebRTC:
         
         logger.info("Sending offer to Cloudflare...")
         logger.info(f"Offer SDP:\n{offer_sdp}")
+        if "a=candidate" not in offer_sdp:
+            logger.warning("Offer SDP contains no ICE candidates (SFU may not receive media)")
         
         # Extract video mid - GStreamer webrtcbin always uses mid=0 for first track
         video_mid = "0"
