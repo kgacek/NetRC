@@ -11,9 +11,6 @@ gi.require_version('GstRtp', '1.0')
 gi.require_version('GstApp', '1.0')
 from gi.repository import Gst, GstWebRTC, GstSdp, GstRtp, GstApp, GLib
 import json
-import base64
-import hmac
-import hashlib
 import re
 import os
 import sys
@@ -336,20 +333,40 @@ class GStreamerWebRTC:
         self.stats_poll_id = None
         self.ice_candidate_count = 0
 
-    def build_turn_credentials(self):
-        """Generate TURN credentials for Cloudflare TURN (HMAC-SHA1)."""
+    def fetch_turn_credentials(self):
+        """Fetch TURN credentials from Cloudflare TURN API."""
         if not CF_TURN_KEY_ID or not CF_TURN_TOKEN:
-            return None, None
+            return None, None, None
 
-        expiry = int(time.time()) + TURN_TTL_SECONDS
-        username = f"{expiry}:{CF_TURN_KEY_ID}"
-        digest = hmac.new(
-            CF_TURN_TOKEN.encode('utf-8'),
-            username.encode('utf-8'),
-            hashlib.sha1
-        ).digest()
-        password = base64.b64encode(digest).decode('utf-8')
-        return username, password
+        url = f"{CLOUDFLARE_API_BASE}/turn/keys/{CF_TURN_KEY_ID}/credentials/generate-ice-servers"
+        headers = {
+            'Authorization': f'Bearer {CF_TURN_TOKEN}',
+            'Content-Type': 'application/json'
+        }
+        payload = {'ttl': TURN_TTL_SECONDS}
+
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=5)
+            if response.status_code != 200:
+                logger.warning(f"TURN credentials fetch failed: {response.status_code} - {response.text}")
+                return None, None, None
+
+            data = response.json()
+            ice_servers = data.get('iceServers', [])
+            turn_server = next((s for s in ice_servers if 'username' in s and 'credential' in s), None)
+            if not turn_server:
+                logger.warning("TURN credentials response missing turn server")
+                return None, None, None
+
+            turn_urls = turn_server.get('urls', [])
+            if not turn_urls:
+                logger.warning("TURN credentials response missing turn URLs")
+                return None, None, None
+
+            return turn_urls[0], turn_server.get('username'), turn_server.get('credential')
+        except Exception as e:
+            logger.warning(f"TURN credentials fetch error: {e}")
+            return None, None, None
     
     def create_pipeline(self):
         """Create GStreamer pipeline reading from rpicam-vid hardware encoder via FIFO"""
@@ -389,15 +406,22 @@ class GStreamerWebRTC:
         self.webrtc.connect('pad-added', self.on_webrtc_pad_added)
 
         # Configure TURN if provided
+        turn_url = TURN_URL
         turn_user, turn_pass = (TURN_USER, TURN_PASS)
-        if not (turn_user and turn_pass):
-            turn_user, turn_pass = self.build_turn_credentials()
 
-        if TURN_URL and turn_user and turn_pass:
+        if not (turn_url and turn_user and turn_pass):
+            turn_url, turn_user, turn_pass = self.fetch_turn_credentials()
+
+        if turn_url and turn_user and turn_pass:
             try:
-                turn_uri = f"turn://{turn_user}:{turn_pass}@{TURN_URL}"
+                if turn_url.startswith('turn:') or turn_url.startswith('turns:'):
+                    scheme, rest = turn_url.split(':', 1)
+                    turn_uri = f"{scheme}://{turn_user}:{turn_pass}@{rest.lstrip('//')}"
+                else:
+                    turn_uri = f"turn://{turn_user}:{turn_pass}@{turn_url}"
+
                 self.webrtc.set_property('turn-server', turn_uri)
-                logger.info("webrtcbin TURN server configured")
+                logger.info(f"webrtcbin TURN server configured: {turn_uri}")
             except Exception as e:
                 logger.warning(f"Failed to set TURN server: {e}")
 
