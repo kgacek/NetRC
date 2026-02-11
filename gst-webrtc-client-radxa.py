@@ -503,6 +503,7 @@ class GStreamerWebRTC:
             
             data = response.json()
             logger.info("Received answer from Cloudflare")
+            logger.info(f"Answer SDP:\n{data['sessionDescription']['sdp']}")
             
             # Print session info on first successful connection
             if not hasattr(self, '_session_info_printed'):
