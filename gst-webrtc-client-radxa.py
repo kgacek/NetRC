@@ -339,6 +339,11 @@ class GStreamerWebRTC:
         self.webrtc.connect('notify::ice-connection-state', self.on_ice_connection_state)
         self.webrtc.connect('notify::ice-gathering-state', self.on_ice_gathering_state)
         
+        # Setup FPS monitoring
+        self.setup_fps_probe()
+    
+    def link_to_webrtc(self):
+        """Link rtph264pay to webrtcbin after pipeline is READY"""
         # Get rtph264pay element
         pay = self.pipe.get_by_name('pay')
         if not pay:
@@ -348,8 +353,10 @@ class GStreamerWebRTC:
         if not pay_src:
             raise RuntimeError("rtph264pay src pad not found")
         
-        # Request sink pad from webrtcbin using old API (GStreamer 1.18)
-        webrtc_sink = self.webrtc.get_request_pad('sink_%u')
+        # Now request sink pad (webrtcbin is in pipeline and READY)
+        webrtc_sink = self.webrtc.request_pad(
+            self.webrtc.get_pad_template('sink_%u'), None, None
+        )
         if not webrtc_sink:
             raise RuntimeError("Could not request sink pad from webrtcbin")
         
@@ -363,9 +370,6 @@ class GStreamerWebRTC:
         # Get transceiver that was auto-created
         self.transceiver = webrtc_sink.get_property('transceiver')
         logger.info(f"Auto-created transceiver: {self.transceiver}")
-        
-        # Setup FPS monitoring
-        self.setup_fps_probe()
         
     def on_negotiation_needed(self, element):
         """Handle negotiation needed"""
@@ -521,11 +525,23 @@ class GStreamerWebRTC:
         
         logger.info(f"Pipeline started: {ret}")
         
+        # Link to webrtcbin after pipeline is PLAYING
+        GLib.timeout_add(500, self.delayed_link)
+        
         # Monitor pipeline stats
         GLib.timeout_add_seconds(5, self.print_stats)
         
         # Trigger negotiation after pipeline is running
         GLib.timeout_add(2000, self.trigger_negotiation)
+    
+    def delayed_link(self):
+        """Link rtph264pay to webrtcbin after pipeline is running"""
+        try:
+            self.link_to_webrtc()
+        except Exception as e:
+            logger.error(f"Failed to link to webrtc: {e}")
+            self.main_loop.quit()
+        return False
     
     def trigger_negotiation(self):
         """Trigger WebRTC negotiation"""
