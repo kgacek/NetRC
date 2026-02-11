@@ -562,14 +562,14 @@ class GStreamerWebRTC:
                 print(f"{'='*60}\n")
                 self._session_info_printed = True
             
-            # Set remote description
+            # Set remote description in GLib thread
             answer_sdp = data['sessionDescription']['sdp']
-            self.set_remote_description(answer_sdp)
+            GLib.idle_add(self.set_remote_description, answer_sdp)
         except Exception as e:
             logger.error(f"Error sending offer: {e}")
     
     def set_remote_description(self, answer_sdp):
-        """Set remote description from Cloudflare answer"""
+        """Set remote description from Cloudflare answer (must run in GLib main loop)"""
         ret, sdp = GstSdp.SDPMessage.new_from_text(answer_sdp)
         answer = GstWebRTC.WebRTCSessionDescription.new(GstWebRTC.WebRTCSDPType.ANSWER, sdp)
         
@@ -578,12 +578,14 @@ class GStreamerWebRTC:
         promise.interrupt()
         
         logger.info("Remote description set, streaming started!")
-        self.start_webrtc_stats()
+        GLib.idle_add(self.start_webrtc_stats)
+        return False
 
     def start_webrtc_stats(self):
         """Start periodic WebRTC stats polling"""
         if self.stats_poll_id is None:
             self.stats_poll_id = GLib.timeout_add_seconds(2, self.poll_webrtc_stats)
+        return False
 
     def poll_webrtc_stats(self):
         """Poll webrtcbin stats and log bytesSent if available"""
