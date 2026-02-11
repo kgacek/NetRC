@@ -639,13 +639,30 @@ class GStreamerWebRTC:
             
             data = response.json()
             logger.info("Received answer from Cloudflare")
+            logger.info(f"Tracks response: {data.get('tracks')}")
+
+            if data.get('tracks') and data['tracks'][0].get('errorCode'):
+                logger.error(f"Track error: {data['tracks'][0].get('errorDescription')}")
+                return
+
+            if not data.get('sessionDescription'):
+                logger.error("No sessionDescription in Cloudflare response")
+                return
 
             answer_sdp = data['sessionDescription']['sdp']
             logger.info(f"Answer SDP (first 400 chars):\n{answer_sdp[:400]}")
+            try:
+                with open('/tmp/cf-answer.sdp', 'w') as f:
+                    f.write(answer_sdp)
+            except Exception as e:
+                logger.warning(f"Failed to write /tmp/cf-answer.sdp: {e}")
+
             if "a=inactive" in answer_sdp:
                 logger.warning("Answer SDP has a=inactive for video")
             if "a=recvonly" not in answer_sdp and "a=sendrecv" not in answer_sdp:
                 logger.warning("Answer SDP missing recvonly/sendrecv for video")
+            if "a=ice-pwd:" not in answer_sdp:
+                logger.warning("Answer SDP missing ice-pwd")
             
             # Print session info on first successful connection
             if not hasattr(self, '_session_info_printed'):
