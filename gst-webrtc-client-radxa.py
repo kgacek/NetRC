@@ -356,14 +356,9 @@ class GStreamerWebRTC:
         self.webrtc.connect('notify::ice-gathering-state', self.on_ice_gathering_state)
         self.webrtc.connect('pad-added', self.on_webrtc_pad_added)
         
-        # Add video transceiver explicitly (fixes missing media section in SDP)
-        caps = Gst.Caps.from_string("application/x-rtp,media=video,encoding-name=H264,payload=96")
-        self.transceiver = self.webrtc.emit('add-transceiver', GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY, caps)
-        logger.info(f"Added video transceiver: {self.transceiver}")
-        
-        # Monitor transceiver for when sender is ready
-        if self.transceiver:
-            self.transceiver.connect('notify::sender', self.on_transceiver_sender_ready)
+        # Let webrtcbin create a single transceiver from the linked RTP pad.
+        # Explicit add-transceiver can create a second m=video section and confuse SFU.
+        self.transceiver = None
         
         # Flag to track if negotiation has been started
         self.negotiation_started = False
@@ -410,9 +405,26 @@ class GStreamerWebRTC:
         logger.debug(f"ICE candidate: {candidate}")
     
     def on_webrtc_pad_added(self, element, pad):
-        """Called when pad is added to webrtcbin - trigger negotiation"""
+        """Called when pad is added to webrtcbin - set direction and trigger negotiation"""
         logger.info(f"WebRTC pad added: {pad.get_name()}, caps: {pad.get_current_caps()}")
-        
+
+        transceiver = None
+        try:
+            transceiver = pad.get_property('transceiver')
+        except Exception:
+            transceiver = None
+
+        if transceiver:
+            self.transceiver = transceiver
+            try:
+                self.transceiver.set_property(
+                    'direction',
+                    GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY
+                )
+                logger.info("Set transceiver direction to SENDONLY")
+            except Exception as e:
+                logger.warning(f"Failed to set transceiver direction: {e}")
+
         # Trigger negotiation once when first pad is added (means rtph264pay connected)
         if not self.negotiation_started:
             logger.info("RTP pad connected, triggering negotiation in 1 second...")
@@ -422,7 +434,7 @@ class GStreamerWebRTC:
         """Called when transceiver sender is ready"""
         sender = transceiver.get_property('sender')
         if sender and not self.negotiation_started:
-            logger.info(f"Transceiver sender ready, triggering negotiation...")
+            logger.info("Transceiver sender ready, triggering negotiation...")
             GLib.timeout_add(500, self.trigger_negotiation)
     
     def on_ice_gathering_state(self, element, pspec):
@@ -739,10 +751,10 @@ class GStreamerWebRTC:
         stderr_log = open('/tmp/v4l2-encode.log', 'ab')
         
         # Use GStreamer to encode v4l2 -> H.264 -> FIFO
-        # Single-threaded pipeline for better reliability
+        # This replaces rpicam-vid on Radxa
         self.rpicam_process = subprocess.Popen([
             'gst-launch-1.0', '-e',
-            'v4l2src', 'device=/dev/video0', 'io-mode=dmabuf', '!',
+            'v4l2src', 'device=/dev/video0', '!',
             f'video/x-raw,format=NV12,width={WIDTH},height={HEIGHT},framerate={FRAMERATE}/1', '!',
             'videoconvert', '!',
             'video/x-raw,format=I420', '!',
@@ -750,9 +762,9 @@ class GStreamerWebRTC:
             'rc-mode=cbr', 'profile=baseline', 'header-mode=each-idr', '!',
             'h264parse', '!',
             'video/x-h264,stream-format=byte-stream,alignment=nal', '!',
-            'filesink', 'sync=false', f'location={self.fifo_path}'
+            'filesink', f'location={self.fifo_path}'
         ], stdout=subprocess.DEVNULL, stderr=stderr_log)
-        logger.info(f"Started v4l2src+mpph264enc: {WIDTH}x{HEIGHT} @ {FRAMERATE}fps, {BITRATE/1000000}Mbps (dmabuf mode)")
+        logger.info(f"Started v4l2src+mpph264enc: {WIDTH}x{HEIGHT} @ {FRAMERATE}fps, {BITRATE/1000000}Mbps")
     
     def create_and_start_pipeline(self):
         """Create and start GStreamer pipeline (called after rpicam-vid delay)"""
