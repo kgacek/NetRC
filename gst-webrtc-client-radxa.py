@@ -739,10 +739,10 @@ class GStreamerWebRTC:
         stderr_log = open('/tmp/v4l2-encode.log', 'ab')
         
         # Use GStreamer to encode v4l2 -> H.264 -> FIFO
-        # This replaces rpicam-vid on Radxa
+        # Single-threaded pipeline for better reliability
         self.rpicam_process = subprocess.Popen([
             'gst-launch-1.0', '-e',
-            'v4l2src', 'device=/dev/video0', '!',
+            'v4l2src', 'device=/dev/video0', 'io-mode=dmabuf', '!',
             f'video/x-raw,format=NV12,width={WIDTH},height={HEIGHT},framerate={FRAMERATE}/1', '!',
             'videoconvert', '!',
             'video/x-raw,format=I420', '!',
@@ -750,9 +750,9 @@ class GStreamerWebRTC:
             'rc-mode=cbr', 'profile=baseline', 'header-mode=each-idr', '!',
             'h264parse', '!',
             'video/x-h264,stream-format=byte-stream,alignment=nal', '!',
-            'filesink', f'location={self.fifo_path}'
+            'filesink', 'sync=false', f'location={self.fifo_path}'
         ], stdout=subprocess.DEVNULL, stderr=stderr_log)
-        logger.info(f"Started v4l2src+mpph264enc: {WIDTH}x{HEIGHT} @ {FRAMERATE}fps, {BITRATE/1000000}Mbps")
+        logger.info(f"Started v4l2src+mpph264enc: {WIDTH}x{HEIGHT} @ {FRAMERATE}fps, {BITRATE/1000000}Mbps (dmabuf mode)")
     
     def create_and_start_pipeline(self):
         """Create and start GStreamer pipeline (called after rpicam-vid delay)"""
