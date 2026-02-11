@@ -307,31 +307,78 @@ class GStreamerWebRTC:
     def create_pipeline(self):
         """Create GStreamer pipeline using V4L2 with Rockchip MPP hardware encoder"""
         
-        # Working pipeline for Radxa Zero 3W:
-        # v4l2src (NV12) -> videoconvert -> I420 -> mpph264enc (hardware)
-        # Note: Direct NV12->mpph264enc causes RGA errors, need I420 conversion
+        # Simpler approach: create everything in one pipeline string with manual pad request
+        self.pipe = Gst.Pipeline.new('main-pipeline')
         
-        # Build pipeline without linking to webrtcbin (will link manually after transceiver)
-        pipeline_str = f"""
-        v4l2src device=/dev/video0 name=src !
-        video/x-raw,format=NV12,width={WIDTH},height={HEIGHT},framerate={FRAMERATE}/1 !
-        videoconvert !
-        video/x-raw,format=I420 !
-        queue leaky=downstream max-size-time={QUEUE_MAX_TIME_NS} max-size-bytes=0 max-size-buffers={QUEUE_MAX_BUFFERS} !
-        mpph264enc bps={BITRATE} bps-max={BITRATE} gop={FRAMERATE} rc-mode=cbr profile=baseline header-mode=each-idr !
-        h264parse config-interval=1 !
-        video/x-h264,stream-format=avc,alignment=au !
-        rtph264pay name=pay pt=96 mtu=1200 config-interval=1 aggregate-mode=zero-latency
-        """
+        # Create elements
+        v4l2src = Gst.ElementFactory.make('v4l2src', 'src')
+        v4l2src.set_property('device', '/dev/video0')
         
-        logger.info("Creating GStreamer pipeline (Radxa Zero 3W with Rockchip MPP)")
-        self.pipe = Gst.parse_launch(pipeline_str)
+        capsfilter1 = Gst.ElementFactory.make('capsfilter')
+        caps1 = Gst.Caps.from_string(f'video/x-raw,format=NV12,width={WIDTH},height={HEIGHT},framerate={FRAMERATE}/1')
+        capsfilter1.set_property('caps', caps1)
         
-        # Create webrtcbin separately
+        videoconvert = Gst.ElementFactory.make('videoconvert')
+        
+        capsfilter2 = Gst.ElementFactory.make('capsfilter')
+        caps2 = Gst.Caps.from_string('video/x-raw,format=I420')
+        capsfilter2.set_property('caps', caps2)
+        
+        queue = Gst.ElementFactory.make('queue')
+        queue.set_property('leaky', 2)  # downstream
+        queue.set_property('max-size-time', QUEUE_MAX_TIME_NS)
+        queue.set_property('max-size-bytes', 0)
+        queue.set_property('max-size-buffers', QUEUE_MAX_BUFFERS)
+        
+        encoder = Gst.ElementFactory.make('mpph264enc', 'enc')
+        encoder.set_property('bps', BITRATE)
+        encoder.set_property('bps-max', BITRATE)
+        encoder.set_property('gop', FRAMERATE)
+        encoder.set_property('rc-mode', 1)  # CBR
+        encoder.set_property('profile', 66)  # baseline
+        encoder.set_property('header-mode', 1)  # each-idr
+        
+        h264parse = Gst.ElementFactory.make('h264parse')
+        h264parse.set_property('config-interval', 1)
+        
+        capsfilter3 = Gst.ElementFactory.make('capsfilter')
+        caps3 = Gst.Caps.from_string('video/x-h264,stream-format=avc,alignment=au')
+        capsfilter3.set_property('caps', caps3)
+        
+        rtppay = Gst.ElementFactory.make('rtph264pay', 'pay')
+        rtppay.set_property('pt', 96)
+        rtppay.set_property('mtu', 1200)
+        rtppay.set_property('config-interval', 1)
+        rtppay.set_property('aggregate-mode', 0)  # zero-latency
+        
         self.webrtc = Gst.ElementFactory.make('webrtcbin', 'sendrecv')
         self.webrtc.set_property('bundle-policy', GstWebRTC.WebRTCBundlePolicy.MAX_BUNDLE)
         self.webrtc.set_property('stun-server', 'stun://stun.cloudflare.com:3478')
+        
+        # Add all elements to pipeline
+        self.pipe.add(v4l2src)
+        self.pipe.add(capsfilter1)
+        self.pipe.add(videoconvert)
+        self.pipe.add(capsfilter2)
+        self.pipe.add(queue)
+        self.pipe.add(encoder)
+        self.pipe.add(h264parse)
+        self.pipe.add(capsfilter3)
+        self.pipe.add(rtppay)
         self.pipe.add(self.webrtc)
+        
+        # Link elements up to rtppay
+        v4l2src.link(capsfilter1)
+        capsfilter1.link(videoconvert)
+        videoconvert.link(capsfilter2)
+        capsfilter2.link(queue)
+        queue.link(encoder)
+        encoder.link(h264parse)
+        h264parse.link(capsfilter3)
+        capsfilter3.link(rtppay)
+        
+        # rtppay -> webrtcbin will be linked after pipeline is PLAYING
+        logger.info("Created GStreamer pipeline (Radxa Zero 3W with Rockchip MPP)")
         
         # Connect signals
         self.webrtc.connect('on-negotiation-needed', self.on_negotiation_needed)
@@ -553,7 +600,7 @@ class GStreamerWebRTC:
     
     def setup_fps_probe(self):
         """Attach a buffer probe to measure real FPS"""
-        pay = self.pipe.get_by_name('rtph264pay0')
+        pay = self.pipe.get_by_name('pay')
         if not pay:
             logger.warning("rtph264pay not found for FPS probe")
             return
