@@ -611,6 +611,8 @@ class GStreamerWebRTC:
             match = re.search(r'bytesSent=(\d+)', stats_str)
             if match:
                 logger.info(f"WebRTC bytesSent: {match.group(1)}")
+            else:
+                logger.info(f"WebRTC stats (no bytesSent found): {stats_str}")
         except Exception as e:
             logger.debug(f"Stats parsing error: {e}")
     
