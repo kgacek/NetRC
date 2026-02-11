@@ -821,10 +821,13 @@ class GStreamerWebRTC:
 
     def _drain_nals(self, buffer):
         """Extract NAL units from buffer and push to appsrc"""
+        nals_found = 0
         while True:
             start, sc_len = self._find_start_code(buffer, 0)
             if start == -1:
                 # keep last 3 bytes to detect a start code split across reads
+                if len(buffer) > 10000 and nals_found == 0:
+                    logger.warning(f"Large buffer ({len(buffer)} bytes) but no start code found!")
                 if len(buffer) > 3:
                     del buffer[:-3]
                 return
@@ -833,10 +836,13 @@ class GStreamerWebRTC:
 
             next_start, _ = self._find_start_code(buffer, sc_len)
             if next_start == -1:
+                if len(buffer) > 50000:
+                    logger.warning(f"Buffer too large ({len(buffer)} bytes), no next start code. First bytes: {buffer[:20].hex()}")
                 return
 
             nal = bytes(buffer[:next_start])
             del buffer[:next_start]
+            nals_found += 1
 
             self._push_nal(nal, sc_len)
 
