@@ -875,6 +875,8 @@ class GStreamerWebRTC:
         if self.drop_until_idr:
             if nal_type not in (5, 7, 8):
                 self.drop_count += 1
+                if self.drop_count % 100 == 0:
+                    logger.warning(f"Dropping NALs until IDR, count={self.drop_count}")
                 return
             if nal_type == 5:
                 if self.sps_pps_needed:
@@ -885,6 +887,8 @@ class GStreamerWebRTC:
         # If backlog is still above low watermark, drop non-IDR slices aggressively
         if level_bytes > self.drop_low_watermark and nal_type in (1, 2, 3, 4):
             self.drop_count += 1
+            if self.drop_count % 100 == 0:
+                logger.warning(f"Dropping P-frames due to backlog ({level_bytes} bytes), count={self.drop_count}")
             return
 
         buf = Gst.Buffer.new_allocate(None, len(nal), None)
