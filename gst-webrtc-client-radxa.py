@@ -307,6 +307,7 @@ async def run_control_subscriber(car_controller, control_session_id):
 class GStreamerWebRTC:
     def __init__(self):
         Gst.init(None)
+        self.log_gst_versions()
         self.pipe = None
         self.webrtc = None
         self.session_id = None
@@ -332,6 +333,27 @@ class GStreamerWebRTC:
         self.drop_count = 0
         self.stats_poll_id = None
         self.ice_candidate_count = 0
+
+    def log_gst_versions(self):
+        try:
+            logger.info(f"GStreamer version: {Gst.version_string()}")
+        except Exception as e:
+            logger.warning(f"Failed to read GStreamer version: {e}")
+
+        try:
+            registry = Gst.Registry.get()
+            webrtc_plugin = registry.find_plugin("webrtc")
+            if webrtc_plugin:
+                logger.info(
+                    f"webrtc plugin: {webrtc_plugin.get_version()} ({webrtc_plugin.get_filename()})"
+                )
+            nice_plugin = registry.find_plugin("nice")
+            if nice_plugin:
+                logger.info(
+                    f"nice plugin: {nice_plugin.get_version()} ({nice_plugin.get_filename()})"
+                )
+        except Exception as e:
+            logger.warning(f"Failed to read plugin versions: {e}")
 
     def fetch_turn_credentials(self):
         """Fetch TURN credentials from Cloudflare TURN API."""
