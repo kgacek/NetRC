@@ -133,7 +133,7 @@ async def run_control_subscriber(car_controller, control_session_id):
         )
         
         # Use Cloudflare /datachannels/establish API
-        url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/new"
+        url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/new?thirdparty=true"
         headers = {
             'Authorization': f'Bearer {CLOUDFLARE_APP_SECRET}',
             'Content-Type': 'application/json'
@@ -494,7 +494,7 @@ class GStreamerWebRTC:
         # Create session NOW, right before sending offer
         if not self.session_id:
             logger.info("Creating Cloudflare session...")
-            url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/new"
+            url = f"{CLOUDFLARE_API_BASE}/apps/{CLOUDFLARE_APP_ID}/sessions/new?thirdparty=true"
             headers = {'Authorization': f'Bearer {CLOUDFLARE_APP_SECRET}'}
             
             response = requests.post(url, headers=headers, timeout=10)
