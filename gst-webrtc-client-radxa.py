@@ -731,13 +731,17 @@ class GStreamerWebRTC:
         ret, sdp = GstSdp.SDPMessage.new_from_text(answer_sdp)
         answer = GstWebRTC.WebRTCSessionDescription.new(GstWebRTC.WebRTCSDPType.ANSWER, sdp)
         
-        promise = Gst.Promise.new()
+        promise = Gst.Promise.new_with_change_func(self.on_set_remote_description, None, None)
         self.webrtc.emit('set-remote-description', answer, promise)
-        promise.interrupt()
-        
-        logger.info("Remote description set, streaming started!")
-        GLib.idle_add(self.start_webrtc_stats)
         return False
+
+    def on_set_remote_description(self, promise, *_):
+        try:
+            res = promise.wait()
+            logger.info(f"Remote description set, promise result: {res}")
+        except Exception as e:
+            logger.warning(f"Remote description promise error: {e}")
+        GLib.idle_add(self.start_webrtc_stats)
 
     def start_webrtc_stats(self):
         """Start periodic WebRTC stats polling"""
