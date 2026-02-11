@@ -329,9 +329,10 @@ class GStreamerWebRTC:
         video/x-raw,format=NV12,width={WIDTH},height={HEIGHT},framerate={FRAMERATE}/1 !
         videoconvert !
         video/x-raw,format=I420 !
-        mpph264enc bps={BITRATE} bps-max={BITRATE} gop={FRAMERATE} rc-mode=cbr profile=baseline header-mode=each-idr !
+        mpph264enc bps={BITRATE} bps-max={BITRATE} gop={FRAMERATE} rc-mode=cbr profile=66 header-mode=each-idr !
+        video/x-h264,profile=baseline !
         h264parse !
-        video/x-h264,stream-format=avc,alignment=au,profile=baseline !
+        video/x-h264,stream-format=avc,alignment=au !
         rtph264pay pt=96 mtu=1200 config-interval=1 aggregate-mode=zero-latency !
         application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000 !
         webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.cloudflare.com:3478
