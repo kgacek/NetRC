@@ -322,10 +322,10 @@ class GStreamerWebRTC:
         self.drop_count = 0
     
     def create_pipeline(self):
-        """Create GStreamer pipeline reading from rpicam-vid hardware encoder via FIFO"""
-        # Use filesrc to read directly from FIFO - simpler than appsrc
+        """Create GStreamer pipeline reading from rpicam-vid hardware encoder via TCP"""
+        # Use tcpserversrc to read from gst-launch via TCP socket (avoids FIFO deadlock)
         pipeline_str = f"""
-        filesrc location={self.fifo_path} !
+        tcpserversrc host=127.0.0.1 port=5000 !
         h264parse !
         video/x-h264,stream-format=avc,alignment=au,profile=baseline !
         rtph264pay pt=96 mtu=1200 config-interval=1 aggregate-mode=zero-latency !
@@ -721,17 +721,14 @@ class GStreamerWebRTC:
             
             # Don't create Cloudflare session yet - wait until we're ready to send offer
             # This prevents session timeout
-            
-            # Ensure FIFO exists before starting rpicam and pipeline
-            self.ensure_fifo()
 
-            # Start rpicam-vid process (returns immediately)
+            # Start gst-launch first (will connect to tcpserversrc)
             self.start_rpicam()
             
-            # Schedule pipeline creation after rpicam-vid initializes
+            # Schedule pipeline creation after gst-launch initializes
+            # tcpserversrc will wait for tcpclientsink to connect
             logger.info("Scheduling pipeline creation in 2 seconds...")
-            GLib.timeout_add(2000, self.create_and_start_pipeline)            
-            # NO FIFO reader thread needed - filesrc reads FIFO directly            
+            GLib.timeout_add(2000, self.create_and_start_pipeline)
         except Exception as e:
             logger.error(f"Initialization failed: {e}")
             self.main_loop.quit()
@@ -746,14 +743,11 @@ class GStreamerWebRTC:
             # Process still running
             return
 
-        # FIFO should already exist
-        self.ensure_fifo()
-
+        # No FIFO needed - using TCP socket
         stderr_log = open('/tmp/v4l2-encode.log', 'ab')
         
-        # Use GStreamer to encode v4l2 -> H.264 -> FIFO
+        # Use GStreamer to encode v4l2 -> H.264 -> TCP socket
         # This replaces rpicam-vid on Radxa
-        # NO -e flag to avoid early termination
         self.rpicam_process = subprocess.Popen([
             'gst-launch-1.0',
             'v4l2src', 'device=/dev/video0', '!',
@@ -764,9 +758,9 @@ class GStreamerWebRTC:
             'rc-mode=cbr', 'profile=baseline', 'header-mode=each-idr', '!',
             'h264parse', '!',
             'video/x-h264,stream-format=byte-stream,alignment=nal', '!',
-            'filesink', f'location={self.fifo_path}', 'sync=false'
+            'tcpclientsink', 'host=127.0.0.1', 'port=5000'
         ], stdout=subprocess.DEVNULL, stderr=stderr_log)
-        logger.info(f"Started v4l2src+mpph264enc PID={self.rpicam_process.pid}: {WIDTH}x{HEIGHT} @ {FRAMERATE}fps, {BITRATE/1000000}Mbps")
+        logger.info(f"Started v4l2src+mpph264enc->TCP PID={self.rpicam_process.pid}: {WIDTH}x{HEIGHT} @ {FRAMERATE}fps, {BITRATE/1000000}Mbps")
         
     def monitor_rpicam(self):
         """Check if gst-launch is still running and restart if needed"""
