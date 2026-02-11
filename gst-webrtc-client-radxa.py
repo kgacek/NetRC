@@ -11,6 +11,7 @@ gi.require_version('GstRtp', '1.0')
 gi.require_version('GstApp', '1.0')
 from gi.repository import Gst, GstWebRTC, GstSdp, GstRtp, GstApp, GLib
 import json
+import re
 import os
 import sys
 import logging
@@ -321,6 +322,7 @@ class GStreamerWebRTC:
         self.cached_pps = None
         self.sps_pps_needed = False
         self.drop_count = 0
+        self.stats_poll_id = None
     
     def create_pipeline(self):
         """Create GStreamer pipeline reading from rpicam-vid hardware encoder via FIFO"""
@@ -576,6 +578,41 @@ class GStreamerWebRTC:
         promise.interrupt()
         
         logger.info("Remote description set, streaming started!")
+        self.start_webrtc_stats()
+
+    def start_webrtc_stats(self):
+        """Start periodic WebRTC stats polling"""
+        if self.stats_poll_id is None:
+            self.stats_poll_id = GLib.timeout_add_seconds(2, self.poll_webrtc_stats)
+
+    def poll_webrtc_stats(self):
+        """Poll webrtcbin stats and log bytesSent if available"""
+        if not self.webrtc:
+            return True
+
+        promise = Gst.Promise.new_with_change_func(self.on_webrtc_stats, None, None)
+        try:
+            # None => all stats
+            self.webrtc.emit('get-stats', None, promise)
+        except Exception as e:
+            logger.debug(f"get-stats not available: {e}")
+        return True
+
+    def on_webrtc_stats(self, promise, _unused, _):
+        """Handle webrtcbin stats promise"""
+        try:
+            promise.wait()
+            reply = promise.get_reply()
+            stats = reply.get_value('stats') if reply else None
+            if not stats:
+                return
+
+            stats_str = stats.to_string()
+            match = re.search(r'bytesSent=(\d+)', stats_str)
+            if match:
+                logger.info(f"WebRTC bytesSent: {match.group(1)}")
+        except Exception as e:
+            logger.debug(f"Stats parsing error: {e}")
     
     def start_pipeline(self):
         """Start the GStreamer pipeline"""
