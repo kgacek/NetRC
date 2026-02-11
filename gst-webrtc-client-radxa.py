@@ -566,13 +566,23 @@ class GStreamerWebRTC:
         """Start the GStreamer pipeline"""
         logger.info("Starting pipeline...")
         ret = self.pipe.set_state(Gst.State.PLAYING)
+        logger.info(f"set_state returned: {ret} (FAILURE={Gst.StateChangeReturn.FAILURE}, ASYNC={Gst.StateChangeReturn.ASYNC}, SUCCESS={Gst.StateChangeReturn.SUCCESS})")
+        
         if ret == Gst.StateChangeReturn.FAILURE:
-            logger.error("Failed to start pipeline")
+            # Get error message from bus
+            bus = self.pipe.get_bus()
+            msg = bus.timed_pop_filtered(Gst.SECOND, Gst.MessageType.ERROR)
+            if msg:
+                err, debug = msg.parse_error()
+                logger.error(f"Pipeline error: {err.message}")
+                logger.error(f"Debug: {debug}")
+            else:
+                logger.error("Failed to start pipeline (no error message available)")
             sys.exit(1)
         elif ret == Gst.StateChangeReturn.ASYNC:
             logger.info("Pipeline state change is ASYNC, waiting...")
         
-        logger.info(f"Pipeline started: {ret}")
+        logger.info(f"Pipeline started successfully")
         
         # Link to webrtcbin after pipeline is PLAYING
         GLib.timeout_add(500, self.delayed_link)
