@@ -340,12 +340,21 @@ class GStreamerWebRTC:
 
 
         
-        logger.info("Creating GStreamer pipeline (reading from rpicam-vid FIFO)")
+        logger.info("Creating GStreamer pipeline with v4l2src")
+        logger.info(f"Pipeline string: {pipeline_str}")
         
-        self.pipe = Gst.parse_launch(pipeline_str)
+        try:
+            self.pipe = Gst.parse_launch(pipeline_str)
+        except Exception as e:
+            logger.error(f"Failed to create pipeline: {e}")
+            sys.exit(1)
         
         self.webrtc = self.pipe.get_by_name('sendrecv')
-        # No appsrc anymore - using filesrc
+        if not self.webrtc:
+            logger.error("Failed to get webrtcbin element!")
+            sys.exit(1)
+        
+        # No appsrc anymore - using v4l2src
         self.appsrc = None
         
         # Connect signals
@@ -544,6 +553,14 @@ class GStreamerWebRTC:
     def start_pipeline(self):
         """Start the GStreamer pipeline"""
         logger.info("Starting pipeline...")
+        
+        # Add bus watch for errors
+        bus = self.pipe.get_bus()
+        bus.add_signal_watch()
+        bus.connect("message::error", self.on_bus_error)
+        bus.connect("message::warning", self.on_bus_warning)
+        bus.connect("message::eos", self.on_bus_eos)
+        
         ret = self.pipe.set_state(Gst.State.PLAYING)
         if ret == Gst.StateChangeReturn.FAILURE:
             logger.error("Failed to start pipeline")
@@ -552,9 +569,25 @@ class GStreamerWebRTC:
             logger.info("Pipeline state change is ASYNC, waiting...")
         
         logger.info(f"Pipeline set_state returned: {ret}")
+        logger.info("Pipeline started successfully with v4l2src!")
         
         # Monitor pipeline stats
-        GLib.timeout_add_seconds(5, self.print_stats)
+        GLib.timeout_add_seconds(1, self.print_stats)
+    
+    def on_bus_error(self, bus, message):
+        """Handle ERROR messages from pipeline"""
+        err, debug = message.parse_error()
+        logger.error(f"GStreamer ERROR from {message.src.get_name()}: {err.message}")
+        logger.error(f"Debug info: {debug}")
+        
+    def on_bus_warning(self, bus, message):
+        """Handle WARNING messages from pipeline"""
+        warn, debug = message.parse_warning()
+        logger.warning(f"GStreamer WARNING from {message.src.get_name()}: {warn.message}")
+        
+    def on_bus_eos(self, bus, message):
+        """Handle EOS from pipeline"""
+        logger.info("Got EOS from pipeline")
 
     def ensure_fifo(self):
         """Ensure FIFO exists without removing it while in use"""
@@ -795,8 +828,6 @@ class GStreamerWebRTC:
             
             # Start pipeline
             self.start_pipeline()
-            
-            logger.info("Pipeline started successfully with v4l2src!")
 
             # Trigger negotiation only after caps are negotiated
             GLib.timeout_add(500, self.check_rtp_caps_ready)
