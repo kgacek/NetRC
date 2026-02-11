@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """
-Hardware-accelerated WebRTC streaming using GStreamer for Radxa Zero 3W
-Camera -> Rockchip MPP H.264 -> WebRTC
+Hardware-accelerated WebRTC streaming using GStreamer
+Camera -> Hardware H.264 -> WebRTC (no re-encoding)
 """
 import gi
 gi.require_version('Gst', '1.0')
 gi.require_version('GstWebRTC', '1.0')
 gi.require_version('GstSdp', '1.0')
 gi.require_version('GstRtp', '1.0')
-from gi.repository import Gst, GstWebRTC, GstSdp, GLib
+gi.require_version('GstApp', '1.0')
+from gi.repository import Gst, GstWebRTC, GstSdp, GstRtp, GstApp, GLib
 import json
 import os
 import sys
 import logging
+import stat
 import time
 import threading
 import serial
@@ -43,6 +45,8 @@ BITRATE = 2500000  # 2.5 Mbps for 720p
 # Low-latency tuning
 QUEUE_MAX_TIME_NS = 20_000_000  # 20 ms
 QUEUE_MAX_BUFFERS = 0
+APPsrc_HIGH_WATERMARK = 128 * 1024  # bytes
+APPsrc_LOW_WATERMARK = 64 * 1024    # bytes
 
 class CarController:
     """
@@ -230,7 +234,7 @@ async def run_control_subscriber(car_controller, control_session_id):
             
             # Create negotiated DataChannel with ID from API
             dc_id = data['dataChannels'][0]['id']
-            logger.info(f">>> Radxa subscribing to remote DataChannel with ID: {dc_id}")
+            logger.info(f">>> RPi subscribing to remote DataChannel with ID: {dc_id}")
             logger.info(f">>> Browser should have created local DataChannel with same ID: {dc_id}")
             
             # Wait a bit before creating DataChannel to ensure transport is ready
@@ -300,131 +304,81 @@ class GStreamerWebRTC:
         self.car_controller = None
         self.control_session_id = None
         self.pc_control = None
+        self.fifo_path = '/tmp/h264_fifo'
+        self.rpicam_process = None
+        self.rpicam_restart_count = 0
         self.fps_count = 0
         self.fps_last_time = time.monotonic()
-        self.negotiation_started = False
+        self.appsrc = None
+        self.reader_thread = None
+        self.reader_stop = threading.Event()
+        self.drop_until_idr = False
+        self.appsrc_max_bytes = APPsrc_HIGH_WATERMARK
+        self.drop_high_watermark = APPsrc_HIGH_WATERMARK
+        self.drop_low_watermark = APPsrc_LOW_WATERMARK
+        self.cached_sps = None
+        self.cached_pps = None
+        self.sps_pps_needed = False
+        self.drop_count = 0
     
     def create_pipeline(self):
-        """Create GStreamer pipeline using V4L2 with Rockchip MPP hardware encoder"""
+        """Create GStreamer pipeline reading from rpicam-vid hardware encoder via FIFO"""
+        # GStreamer pipeline reads from FIFO (rpicam-vid already running)
+        # otwierasz FIFO do czytania w trybie binarnym (blokujące)
+        pipeline_str = f"""
+        appsrc name=src is-live=true do-timestamp=true format=time block=false
+            caps=video/x-h264,stream-format=byte-stream,alignment=nal !
+        queue leaky=downstream max-size-time={QUEUE_MAX_TIME_NS} max-size-bytes=0 max-size-buffers={QUEUE_MAX_BUFFERS} !
+        h264parse !
+        video/x-h264,stream-format=avc,alignment=au,profile=baseline !
+        rtph264pay pt=96 mtu=1200 config-interval=1 aggregate-mode=zero-latency !
+        application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000 !
+        webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.cloudflare.com:3478
+        """
+
+
         
-        # Simpler approach: create everything in one pipeline string with manual pad request
-        self.pipe = Gst.Pipeline.new('main-pipeline')
+        logger.info("Creating GStreamer pipeline (reading from rpicam-vid FIFO)")
         
-        # Create elements
-        v4l2src = Gst.ElementFactory.make('v4l2src', 'src')
-        v4l2src.set_property('device', '/dev/video0')
+        self.pipe = Gst.parse_launch(pipeline_str)
         
-        capsfilter1 = Gst.ElementFactory.make('capsfilter')
-        caps1 = Gst.Caps.from_string(f'video/x-raw,format=NV12,width={WIDTH},height={HEIGHT},framerate={FRAMERATE}/1')
-        capsfilter1.set_property('caps', caps1)
-        
-        videoconvert = Gst.ElementFactory.make('videoconvert')
-        
-        capsfilter2 = Gst.ElementFactory.make('capsfilter')
-        caps2 = Gst.Caps.from_string('video/x-raw,format=I420')
-        capsfilter2.set_property('caps', caps2)
-        
-        queue = Gst.ElementFactory.make('queue')
-        queue.set_property('leaky', 2)  # downstream
-        queue.set_property('max-size-time', QUEUE_MAX_TIME_NS)
-        queue.set_property('max-size-bytes', 0)
-        queue.set_property('max-size-buffers', QUEUE_MAX_BUFFERS)
-        
-        encoder = Gst.ElementFactory.make('mpph264enc', 'enc')
-        encoder.set_property('bps', BITRATE)
-        encoder.set_property('bps-max', BITRATE)
-        encoder.set_property('gop', FRAMERATE)
-        encoder.set_property('rc-mode', 1)  # CBR
-        encoder.set_property('profile', 66)  # baseline
-        encoder.set_property('header-mode', 1)  # each-idr
-        
-        h264parse = Gst.ElementFactory.make('h264parse')
-        h264parse.set_property('config-interval', 1)
-        
-        capsfilter3 = Gst.ElementFactory.make('capsfilter')
-        caps3 = Gst.Caps.from_string('video/x-h264,stream-format=avc,alignment=au')
-        capsfilter3.set_property('caps', caps3)
-        
-        rtppay = Gst.ElementFactory.make('rtph264pay', 'pay')
-        rtppay.set_property('pt', 96)
-        rtppay.set_property('mtu', 1200)
-        rtppay.set_property('config-interval', 1)
-        rtppay.set_property('aggregate-mode', 0)  # zero-latency
-        
-        self.webrtc = Gst.ElementFactory.make('webrtcbin', 'sendrecv')
-        self.webrtc.set_property('bundle-policy', GstWebRTC.WebRTCBundlePolicy.MAX_BUNDLE)
-        self.webrtc.set_property('stun-server', 'stun://stun.cloudflare.com:3478')
-        
-        # Block negotiation until we're ready
-        self.negotiation_blocked = True
-        
-        # Add all elements to pipeline
-        self.pipe.add(v4l2src)
-        self.pipe.add(capsfilter1)
-        self.pipe.add(videoconvert)
-        self.pipe.add(capsfilter2)
-        self.pipe.add(queue)
-        self.pipe.add(encoder)
-        self.pipe.add(h264parse)
-        self.pipe.add(capsfilter3)
-        self.pipe.add(rtppay)
-        self.pipe.add(self.webrtc)
-        
-        # Link elements up to rtppay
-        v4l2src.link(capsfilter1)
-        capsfilter1.link(videoconvert)
-        videoconvert.link(capsfilter2)
-        capsfilter2.link(queue)
-        queue.link(encoder)
-        encoder.link(h264parse)
-        h264parse.link(capsfilter3)
-        capsfilter3.link(rtppay)
-        
-        # rtppay -> webrtcbin will be linked after pipeline is PLAYING
-        logger.info("Created GStreamer pipeline (Radxa Zero 3W with Rockchip MPP)")
+        self.webrtc = self.pipe.get_by_name('sendrecv')
+        self.appsrc = self.pipe.get_by_name('src')
+        if self.appsrc:
+            self.appsrc.set_property('max-bytes', self.appsrc_max_bytes)
+            self.appsrc.set_property('min-latency', 0)
+            self.appsrc.set_property('max-latency', 0)
         
         # Connect signals
         self.webrtc.connect('on-negotiation-needed', self.on_negotiation_needed)
         self.webrtc.connect('on-ice-candidate', self.on_ice_candidate)
         self.webrtc.connect('notify::ice-connection-state', self.on_ice_connection_state)
         self.webrtc.connect('notify::ice-gathering-state', self.on_ice_gathering_state)
+        self.webrtc.connect('pad-added', self.on_webrtc_pad_added)
         
-        # Setup FPS monitoring
+        # Add video transceiver explicitly (fixes missing media section in SDP)
+        caps = Gst.Caps.from_string("application/x-rtp,media=video,encoding-name=H264,payload=96")
+        self.transceiver = self.webrtc.emit('add-transceiver', GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY, caps)
+        logger.info(f"Added video transceiver: {self.transceiver}")
+        
+        # Monitor transceiver for when sender is ready
+        if self.transceiver:
+            self.transceiver.connect('notify::sender', self.on_transceiver_sender_ready)
+        
+        # Flag to track if negotiation has been started
+        self.negotiation_started = False
+        self.rtp_caps_check_count = 0
+        
+        # Track ICE gathering state
+        self.pending_offer_sdp = None
+
+        # Start FPS measurement on H.264 parser output (frame-level)
         self.setup_fps_probe()
-    
-    def link_to_webrtc(self):
-        """Link rtph264pay to webrtcbin after pipeline is READY"""
-        # Get rtph264pay element
-        pay = self.pipe.get_by_name('pay')
-        if not pay:
-            raise RuntimeError("rtph264pay element not found")
-        
-        pay_src = pay.get_static_pad('src')
-        if not pay_src:
-            raise RuntimeError("rtph264pay src pad not found")
-        
-        # Now request sink pad (webrtcbin is in pipeline and READY)
-        webrtc_sink = self.webrtc.request_pad(
-            self.webrtc.get_pad_template('sink_%u'), None, None
-        )
-        if not webrtc_sink:
-            raise RuntimeError("Could not request sink pad from webrtcbin")
-        
-        logger.info(f"Linking {pay_src.get_name()} to {webrtc_sink.get_name()}")
-        ret = pay_src.link(webrtc_sink)
-        if ret != Gst.PadLinkReturn.OK:
-            raise RuntimeError(f"Failed to link pads: {ret}")
-        
-        logger.info("Linked rtph264pay to webrtcbin")
-        
-        # Get transceiver that was auto-created
-        self.transceiver = webrtc_sink.get_property('transceiver')
-        logger.info(f"Auto-created transceiver: {self.transceiver}")
         
     def on_negotiation_needed(self, element):
         """Handle negotiation needed"""
-        if self.negotiation_blocked:
-            logger.info("Negotiation needed but blocked, waiting for manual trigger")
+        if not self.rtp_caps_ready():
+            logger.info("Negotiation needed but RTP caps not ready yet.")
             return
         if self.negotiation_started:
             logger.info("Negotiation already started, ignoring.")
@@ -440,18 +394,36 @@ class GStreamerWebRTC:
         reply = promise.get_reply()
         offer = reply.get_value('offer')
         
-        # Set local description
+        # Set local description in a separate promise
         set_promise = Gst.Promise.new()
         element.emit('set-local-description', offer, set_promise)
         
-        # Send offer immediately (ice-lite mode)
+        # With Cloudflare ice-lite, send offer immediately without waiting for ICE gathering
+        # Server will provide ICE candidates in the answer
         logger.info("Sending offer to Cloudflare (ice-lite mode)...")
         sdp = offer.sdp.as_text()
+        import threading
         threading.Thread(target=self.send_offer_to_cloudflare, args=(sdp,), daemon=True).start()
     
     def on_ice_candidate(self, element, mlineindex, candidate):
         """Handle ICE candidate - not needed with ice-lite server"""
         logger.debug(f"ICE candidate: {candidate}")
+    
+    def on_webrtc_pad_added(self, element, pad):
+        """Called when pad is added to webrtcbin - trigger negotiation"""
+        logger.info(f"WebRTC pad added: {pad.get_name()}, caps: {pad.get_current_caps()}")
+        
+        # Trigger negotiation once when first pad is added (means rtph264pay connected)
+        if not self.negotiation_started:
+            logger.info("RTP pad connected, triggering negotiation in 1 second...")
+            GLib.timeout_add(1000, self.trigger_negotiation)
+    
+    def on_transceiver_sender_ready(self, transceiver, pspec):
+        """Called when transceiver sender is ready"""
+        sender = transceiver.get_property('sender')
+        if sender and not self.negotiation_started:
+            logger.info(f"Transceiver sender ready, triggering negotiation...")
+            GLib.timeout_add(500, self.trigger_negotiation)
     
     def on_ice_gathering_state(self, element, pspec):
         """Monitor ICE gathering state"""
@@ -464,7 +436,8 @@ class GStreamerWebRTC:
         logger.info(f"ICE connection state: {state}")
     
     def send_offer_to_cloudflare(self, offer_sdp):
-        """Send offer to Cloudflare Calls API"""
+        """Send offer to Cloudflare Calls API (synchronous)"""
+        import requests
         
         # Create session NOW, right before sending offer
         if not self.session_id:
@@ -496,8 +469,10 @@ class GStreamerWebRTC:
         logger.info("Sending offer to Cloudflare...")
         logger.info(f"Offer SDP:\n{offer_sdp}")
         
-        # Extract video mid
+        # Extract video mid - GStreamer webrtcbin always uses mid=0 for first track
         video_mid = "0"
+        
+        # Try to find it in SDP anyway
         lines = offer_sdp.split('\r\n')
         in_video_section = False
         for line in lines:
@@ -541,7 +516,7 @@ class GStreamerWebRTC:
             data = response.json()
             logger.info("Received answer from Cloudflare")
             
-            # Print session info
+            # Print session info on first successful connection
             if not hasattr(self, '_session_info_printed'):
                 print(f"\n{'='*60}")
                 print(f"SESSION ID: {self.session_id}")
@@ -572,97 +547,120 @@ class GStreamerWebRTC:
         """Start the GStreamer pipeline"""
         logger.info("Starting pipeline...")
         ret = self.pipe.set_state(Gst.State.PLAYING)
-        logger.info(f"set_state returned: {ret} (FAILURE={Gst.StateChangeReturn.FAILURE}, ASYNC={Gst.StateChangeReturn.ASYNC}, SUCCESS={Gst.StateChangeReturn.SUCCESS})")
-        
         if ret == Gst.StateChangeReturn.FAILURE:
-            # Get error message from bus
-            bus = self.pipe.get_bus()
-            msg = bus.timed_pop_filtered(Gst.SECOND, Gst.MessageType.ERROR)
-            if msg:
-                err, debug = msg.parse_error()
-                logger.error(f"Pipeline error: {err.message}")
-                logger.error(f"Debug: {debug}")
-            else:
-                logger.error("Failed to start pipeline (no error message available)")
+            logger.error("Failed to start pipeline")
             sys.exit(1)
         elif ret == Gst.StateChangeReturn.ASYNC:
             logger.info("Pipeline state change is ASYNC, waiting...")
         
-        logger.info(f"Pipeline started successfully")
-        
-        # Link to webrtcbin after pipeline is PLAYING
-        GLib.timeout_add(500, self.delayed_link)
+        logger.info(f"Pipeline set_state returned: {ret}")
         
         # Monitor pipeline stats
         GLib.timeout_add_seconds(5, self.print_stats)
-        
-        # Trigger negotiation after linking
-        GLib.timeout_add(3000, self.trigger_negotiation)
-    
-    def delayed_link(self):
-            # Unblock negotiation after linking
-            self.negotiation_blocked = False
-            logger.info("Unblocked negotiation, will trigger manually in 500ms")
-        """Link rtph264pay to webrtcbin after pipeline is running"""
-        try:
-            self.link_to_webrtc()
-        except Exception as e:
-            logger.error(f"Failed to link to webrtc: {e}")
-            self.main_loop.quit()
-        return False
+
+    def ensure_fifo(self):
+        """Ensure FIFO exists without removing it while in use"""
+        if os.path.exists(self.fifo_path):
+            if not stat.S_ISFIFO(os.stat(self.fifo_path).st_mode):
+                raise RuntimeError(f"{self.fifo_path} exists and is not a FIFO")
+            return
+        os.mkfifo(self.fifo_path)
+        logger.info(f"Created FIFO at {self.fifo_path}")
+
+    def check_rtp_caps_ready(self):
+        """Wait until rtph264pay has negotiated caps with a concrete payload"""
+        if self.negotiation_started:
+            return False
+
+        self.rtp_caps_check_count += 1
+
+        # If rpicam died, try to restart it (without touching FIFO)
+        if self.rpicam_process and self.rpicam_process.poll() is not None:
+            self.rpicam_restart_count += 1
+            logger.warning(f"rpicam-vid exited, restarting (attempt {self.rpicam_restart_count})")
+            self.start_rpicam()
+
+        if self.rtp_caps_ready():
+            logger.info("RTP caps negotiated (payload=96), triggering negotiation...")
+            GLib.timeout_add(100, self.trigger_negotiation)
+            return False
+
+        if self.rtp_caps_check_count % 5 == 0:
+            logger.info("Waiting for RTP caps negotiation...")
+
+        return True
+
+    def setup_fps_probe(self):
+        """Attach a buffer probe to measure real FPS"""
+        parser = self.pipe.get_by_name('h264parse0')
+        if not parser:
+            logger.warning("h264parse element not found for FPS probe")
+            return
+
+        src_pad = parser.get_static_pad('src')
+        if not src_pad:
+            logger.warning("h264parse src pad not found for FPS probe")
+            return
+
+        src_pad.add_probe(Gst.PadProbeType.BUFFER, self.on_frame_buffer)
+        GLib.timeout_add_seconds(1, self.report_fps)
+
+    def on_frame_buffer(self, pad, info):
+        """Count H.264 frame buffers to estimate FPS"""
+        if info.type & Gst.PadProbeType.BUFFER:
+            self.fps_count += 1
+        return Gst.PadProbeReturn.OK
+
+    def report_fps(self):
+        """Report measured FPS once per second"""
+        now = time.monotonic()
+        elapsed = now - self.fps_last_time
+        if elapsed > 0:
+            fps = self.fps_count / elapsed
+            logger.info(f"Measured RTP FPS: {fps:.1f}")
+        self.fps_count = 0
+        self.fps_last_time = now
+        return True
+
+    def rtp_caps_ready(self):
+        """Return True when rtph264pay has negotiated payload=96"""
+        pay = self.pipe.get_by_name('rtph264pay0')
+        if not pay:
+            return False
+
+        src_pad = pay.get_static_pad('src')
+        caps = src_pad.get_current_caps() if src_pad else None
+        if not caps:
+            return False
+
+        return "payload=(int)96" in caps.to_string()
     
     def trigger_negotiation(self):
         """Trigger WebRTC negotiation"""
         if self.negotiation_started:
             return False
-        if self.negotiation_blocked:
-            logger.warning("Cannot trigger negotiation - still blocked")
-            return False
-        logger.info("Manually triggering negotiation...")
-        self.negotiation_blocked = False  # Ensure unblocked
-        self.negotiation_started = True
-        promise = Gst.Promise.new_with_change_func(self.on_offer_created, self.webrtc, None)
-        self.webrtc.emit('create-offer', None, promise)
-        return False
-    
-    def setup_fps_probe(self):
-        """Attach a buffer probe to measure real FPS"""
-        pay = self.pipe.get_by_name('pay')
-        if not pay:
-            logger.warning("rtph264pay not found for FPS probe")
-            return
-        
-        src_pad = pay.get_static_pad('src')
-        if not src_pad:
-            logger.warning("rtph264pay src pad not found")
-            return
-        
-        src_pad.add_probe(Gst.PadProbeType.BUFFER, self.on_frame_buffer)
-        GLib.timeout_add_seconds(1, self.report_fps)
-    
-    def on_frame_buffer(self, pad, info):
-        """Count RTP packets"""
-        if info.type & Gst.PadProbeType.BUFFER:
-            self.fps_count += 1
-        return Gst.PadProbeReturn.OK
-    
-    def report_fps(self):
-        """Report measured FPS"""
-        now = time.monotonic()
-        elapsed = now - self.fps_last_time
-        if elapsed > 0:
-            fps = self.fps_count / elapsed
-            logger.info(f"RTP packets/sec: {fps:.1f}")
-        self.fps_count = 0
-        self.fps_last_time = now
-        return True
+        logger.info("Triggering negotiation...")
+        self.on_negotiation_needed(self.webrtc)
+        return False  # Don't repeat
     
     def print_stats(self):
         """Print pipeline statistics"""
-        if self.webrtc:
-            state = self.webrtc.get_property('ice-connection-state')
-            logger.info(f"ICE connection state: {state}")
-        return True
+        if self.pipe:
+            # Get libcamerasrc element
+            libcamera = self.pipe.get_by_name('libcamerasrc0')
+            if libcamera:
+                # Query for statistics
+                query = Gst.Query.new_latency()
+                if libcamera.query(query):
+                    live, min_lat, max_lat = query.parse_latency()
+                    logger.info(f"Latency: {min_lat/Gst.MSECOND:.1f}ms - {max_lat/Gst.MSECOND:.1f}ms")
+            
+            # Check WebRTC stats
+            if self.webrtc:
+                state = self.webrtc.get_property('ice-connection-state')
+                logger.info(f"ICE connection state: {state}")
+        
+        return True  # Keep calling
     
     def run(self):
         """Main run loop"""
@@ -680,41 +678,229 @@ class GStreamerWebRTC:
         finally:
             if self.pipe:
                 self.pipe.set_state(Gst.State.NULL)
+            if self.reader_stop:
+                self.reader_stop.set()
+            if self.reader_thread and self.reader_thread.is_alive():
+                self.reader_thread.join(timeout=2)
+            if hasattr(self, 'rpicam_process'):
+                self.rpicam_process.terminate()
+                self.rpicam_process.wait()
+            if hasattr(self, 'fifo_path'):
+                import os
+                if os.path.exists(self.fifo_path):
+                    os.remove(self.fifo_path)
             if self.car_controller:
                 self.car_controller.stop()
             if self.pc_control:
+                # Close control connection if exists
                 try:
+                    import asyncio
                     loop = asyncio.new_event_loop()
                     loop.run_until_complete(self.pc_control.close())
                 except:
                     pass
     
     def initialize(self):
-        """Initialize pipeline"""
+        """Initialize pipeline (called from GLib idle)"""
         try:
             # Initialize car controller
             self.car_controller = CarController()
             self.car_controller.init_uart()
             
-            # Create and start pipeline
-            self.create_pipeline()
-            self.start_pipeline()
+            # Don't create Cloudflare session yet - wait until we're ready to send offer
+            # This prevents session timeout
             
-            # Start polling for control session ID
-            GLib.timeout_add_seconds(2, self.check_control_session)
+            # Ensure FIFO exists before starting rpicam and pipeline
+            self.ensure_fifo()
+
+            # Start rpicam-vid process (returns immediately)
+            self.start_rpicam()
+            
+            # Schedule pipeline creation after rpicam-vid initializes
+            logger.info("Scheduling pipeline creation in 2 seconds...")
+            GLib.timeout_add(2000, self.create_and_start_pipeline)
             
         except Exception as e:
             logger.error(f"Initialization failed: {e}")
             self.main_loop.quit()
         
-        return False
+        return False  # Don't repeat idle callback
+    
+    def start_rpicam(self):
+        """Start v4l2src with Rockchip MPP encoder (replaces rpicam-vid)"""
+        import subprocess
+
+        if self.rpicam_process and self.rpicam_process.poll() is not None:
+            return
+
+        # FIFO should already exist
+        self.ensure_fifo()
+
+        stderr_log = open('/tmp/v4l2-encode.log', 'ab')
+        
+        # Use GStreamer to encode v4l2 -> H.264 -> FIFO
+        # This replaces rpicam-vid on Radxa
+        self.rpicam_process = subprocess.Popen([
+            'gst-launch-1.0', '-e',
+            'v4l2src', 'device=/dev/video0', '!',
+            f'video/x-raw,format=NV12,width={WIDTH},height={HEIGHT},framerate={FRAMERATE}/1', '!',
+            'videoconvert', '!',
+            'video/x-raw,format=I420', '!',
+            'mpph264enc', f'bps={BITRATE}', f'bps-max={BITRATE}', f'gop={FRAMERATE}', 
+            'rc-mode=cbr', 'profile=baseline', 'header-mode=each-idr', '!',
+            'h264parse', '!',
+            'video/x-h264,stream-format=byte-stream,alignment=nal', '!',
+            'filesink', f'location={self.fifo_path}'
+        ], stdout=subprocess.DEVNULL, stderr=stderr_log)
+        logger.info(f"Started v4l2src+mpph264enc: {WIDTH}x{HEIGHT} @ {FRAMERATE}fps, {BITRATE/1000000}Mbps")
+    
+    def create_and_start_pipeline(self):
+        """Create and start GStreamer pipeline (called after rpicam-vid delay)"""
+        try:
+            # Create pipeline
+            self.create_pipeline()
+            
+            # Start pipeline
+            self.start_pipeline()
+            
+            logger.info("Pipeline started successfully!")
+
+            # Start FIFO reader feeding appsrc
+            self.start_fifo_reader()
+
+            # Trigger negotiation only after caps are negotiated
+            GLib.timeout_add(500, self.check_rtp_caps_ready)
+            
+            # Start polling for control session ID
+            GLib.timeout_add_seconds(2, self.check_control_session)
+            
+        except Exception as e:
+            logger.error(f"Pipeline creation failed: {e}")
+            self.main_loop.quit()
+        
+        return False  # Don't repeat
+
+    def start_fifo_reader(self):
+        """Start background thread that reads FIFO and pushes to appsrc"""
+        if not self.appsrc:
+            logger.error("appsrc not available; cannot start FIFO reader")
+            return
+        if self.reader_thread and self.reader_thread.is_alive():
+            return
+
+        self.reader_stop.clear()
+        self.reader_thread = threading.Thread(target=self._fifo_reader_loop, daemon=True)
+        self.reader_thread.start()
+        logger.info("Started FIFO reader thread")
+
+    def _fifo_reader_loop(self):
+        """Read H.264 byte-stream from FIFO, split by start codes, push to appsrc"""
+        buffer = bytearray()
+
+        while not self.reader_stop.is_set():
+            try:
+                with open(self.fifo_path, 'rb', buffering=0) as fifo:
+                    while not self.reader_stop.is_set():
+                        chunk = fifo.read(4096)
+                        if not chunk:
+                            time.sleep(0.005)
+                            continue
+                        buffer.extend(chunk)
+                        self._drain_nals(buffer)
+            except Exception as e:
+                logger.warning(f"FIFO reader error: {e}")
+                time.sleep(0.1)
+
+    def _find_start_code(self, data, offset):
+        """Return (index, length) of next H.264 start code or (-1, 0)"""
+        i3 = data.find(b'\x00\x00\x01', offset)
+        i4 = data.find(b'\x00\x00\x00\x01', offset)
+        if i3 == -1 and i4 == -1:
+            return -1, 0
+        if i3 == -1:
+            return i4, 4
+        if i4 == -1:
+            return i3, 3
+        return (i3, 3) if i3 < i4 else (i4, 4)
+
+    def _drain_nals(self, buffer):
+        """Extract NAL units from buffer and push to appsrc"""
+        while True:
+            start, sc_len = self._find_start_code(buffer, 0)
+            if start == -1:
+                # keep last 3 bytes to detect a start code split across reads
+                if len(buffer) > 3:
+                    del buffer[:-3]
+                return
+            if start > 0:
+                del buffer[:start]
+
+            next_start, _ = self._find_start_code(buffer, sc_len)
+            if next_start == -1:
+                return
+
+            nal = bytes(buffer[:next_start])
+            del buffer[:next_start]
+
+            self._push_nal(nal, sc_len)
+
+    def _push_nal(self, nal, sc_len):
+        """Push a single NAL unit to appsrc with simple drop strategy"""
+        if not self.appsrc or len(nal) <= sc_len:
+            return
+
+        nal_type = nal[sc_len] & 0x1F
+
+        if nal_type == 7:
+            self.cached_sps = nal
+        elif nal_type == 8:
+            self.cached_pps = nal
+
+        # Drop strategy when appsrc is backlogged: skip non-IDR slices until next IDR
+        level_bytes = self.appsrc.get_property('current-level-bytes')
+        if level_bytes > self.drop_high_watermark:
+            self.drop_until_idr = True
+            self.sps_pps_needed = True
+
+        if self.drop_until_idr:
+            if nal_type not in (5, 7, 8):
+                self.drop_count += 1
+                return
+            if nal_type == 5:
+                if self.sps_pps_needed:
+                    self._push_cached_parameter_sets()
+                self.drop_until_idr = False
+                self.sps_pps_needed = False
+
+        # If backlog is still above low watermark, drop non-IDR slices aggressively
+        if level_bytes > self.drop_low_watermark and nal_type in (1, 2, 3, 4):
+            self.drop_count += 1
+            return
+
+        buf = Gst.Buffer.new_allocate(None, len(nal), None)
+        buf.fill(0, nal)
+        ret = self.appsrc.emit('push-buffer', buf)
+        if ret != Gst.FlowReturn.OK:
+            logger.debug(f"appsrc push-buffer returned {ret}")
+
+    def _push_cached_parameter_sets(self):
+        """Push cached SPS/PPS before IDR if available"""
+        if self.cached_sps:
+            buf = Gst.Buffer.new_allocate(None, len(self.cached_sps), None)
+            buf.fill(0, self.cached_sps)
+            self.appsrc.emit('push-buffer', buf)
+        if self.cached_pps:
+            buf = Gst.Buffer.new_allocate(None, len(self.cached_pps), None)
+            buf.fill(0, self.cached_pps)
+            self.appsrc.emit('push-buffer', buf)
     
     def check_control_session(self):
         """Poll signaling server for control session ID"""
         if self.control_session_id:
-            return False
+            return False  # Already got it, stop polling
         
         try:
+            import requests
             url = f"{SIGNALING_SERVER}/api/control-session?id={self.session_id}"
             response = requests.get(url, timeout=2)
             if response.status_code == 200:
@@ -723,12 +909,13 @@ class GStreamerWebRTC:
                 if control_session_id:
                     logger.info(f"Got control session ID: {control_session_id}")
                     self.control_session_id = control_session_id
+                    # Setup control subscriber in separate thread
                     threading.Thread(target=self.setup_control_subscriber, daemon=True).start()
-                    return False
+                    return False  # Stop polling
         except Exception as e:
             logger.debug(f"Polling for control session: {e}")
         
-        return True
+        return True  # Continue polling
     
     def setup_control_subscriber(self):
         """Setup control subscriber in asyncio loop"""
@@ -736,16 +923,17 @@ class GStreamerWebRTC:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             
+            # Create task and keep loop running
             async def run_subscriber():
                 self.pc_control = await run_control_subscriber(self.car_controller, self.control_session_id)
                 if self.pc_control:
+                    # Keep loop alive while connection is active
                     while True:
                         await asyncio.sleep(1)
             
             loop.run_until_complete(run_subscriber())
         except Exception as e:
             logger.error(f"Error setting up control subscriber: {e}", exc_info=True)
-
 
 def main():
     if not CLOUDFLARE_APP_ID or not CLOUDFLARE_APP_SECRET:
