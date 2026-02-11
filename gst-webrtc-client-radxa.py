@@ -752,8 +752,9 @@ class GStreamerWebRTC:
         
         # Use GStreamer to encode v4l2 -> H.264 -> FIFO
         # This replaces rpicam-vid on Radxa
+        # NO -e flag to avoid early termination
         self.rpicam_process = subprocess.Popen([
-            'gst-launch-1.0', '-e',
+            'gst-launch-1.0',
             'v4l2src', 'device=/dev/video0', '!',
             f'video/x-raw,format=NV12,width={WIDTH},height={HEIGHT},framerate={FRAMERATE}/1', '!',
             'videoconvert', '!',
