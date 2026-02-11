@@ -332,6 +332,7 @@ class GStreamerWebRTC:
         h264parse !
         video/x-h264,stream-format=avc,alignment=au,profile=baseline !
         rtph264pay pt=96 mtu=1200 config-interval=1 aggregate-mode=zero-latency !
+        queue leaky=downstream max-size-time=20000000 max-size-buffers=0 max-size-bytes=0 !
         application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000 !
         webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.cloudflare.com:3478
         """
@@ -354,6 +355,7 @@ class GStreamerWebRTC:
         self.webrtc.connect('on-ice-candidate', self.on_ice_candidate)
         self.webrtc.connect('notify::ice-connection-state', self.on_ice_connection_state)
         self.webrtc.connect('notify::ice-gathering-state', self.on_ice_gathering_state)
+        self.webrtc.connect('notify::connection-state', self.on_connection_state)
         self.webrtc.connect('pad-added', self.on_webrtc_pad_added)
         
         # Let webrtcbin create a single transceiver from the linked RTP pad.
@@ -460,6 +462,11 @@ class GStreamerWebRTC:
         """Monitor ICE connection state"""
         state = element.get_property('ice-connection-state')
         logger.info(f"ICE connection state: {state}")
+
+    def on_connection_state(self, element, pspec):
+        """Monitor overall WebRTC connection state"""
+        state = element.get_property('connection-state')
+        logger.info(f"WebRTC connection state: {state}")
     
     def send_offer_to_cloudflare(self, offer_sdp):
         """Send offer to Cloudflare Calls API (synchronous)"""
