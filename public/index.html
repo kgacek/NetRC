@@ -328,56 +328,71 @@
 
                 console.log('Our SDP offer:', peerConnection.localDescription.sdp);
 
-                // Pull track from RPi session into OUR session
-                const pullResponse = await fetch(`https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${mySessionId}/tracks/new`, {
-                    method: 'POST',
-                    headers: {
-                        'Authorization': `Bearer ${appSecret}`,
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({
-                        sessionDescription: {
-                            type: 'offer',
-                            sdp: peerConnection.localDescription.sdp
-                        },
-                        tracks: [
-                            {
-                                location: 'remote',
-                                sessionId: rpiSessionId,  // Pull from RPi session
-                                trackName: 'camera'
+                // Pull track from RPi session into OUR session (retry if track isn't ready yet)
+                const pullTrackWithRetry = async (retries = 5, delayMs = 800) => {
+                    for (let attempt = 1; attempt <= retries; attempt++) {
+                        const pullResponse = await fetch(`https://rtc.live.cloudflare.com/v1/apps/${appId}/sessions/${mySessionId}/tracks/new`, {
+                            method: 'POST',
+                            headers: {
+                                'Authorization': `Bearer ${appSecret}`,
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({
+                                sessionDescription: {
+                                    type: 'offer',
+                                    sdp: peerConnection.localDescription.sdp
+                                },
+                                tracks: [
+                                    {
+                                        location: 'remote',
+                                        sessionId: rpiSessionId,  // Pull from RPi session
+                                        trackName: 'camera'
+                                    }
+                                ]
+                            })
+                        });
+
+                        const pullText = await pullResponse.text();
+                        console.log('Pull response status:', pullResponse.status);
+                        console.log('Pull response:', pullText);
+
+                        if (!pullResponse.ok) {
+                            throw new Error(`Failed to pull track: ${pullResponse.status} - ${pullText}`);
+                        }
+
+                        const pullData = JSON.parse(pullText);
+                        console.log('Pull data:', pullData);
+
+                        if (pullData.tracks && pullData.tracks[0] && pullData.tracks[0].errorCode) {
+                            const desc = pullData.tracks[0].errorDescription || '';
+                            const code = pullData.tracks[0].errorCode || '';
+                            if (desc.includes('Track not found') || code.includes('track_not_found')) {
+                                if (attempt < retries) {
+                                    updateStatus(`Track not ready yet, retrying (${attempt}/${retries})...`);
+                                    await new Promise(resolve => setTimeout(resolve, delayMs));
+                                    continue;
+                                }
                             }
-                        ]
-                    })
+                            throw new Error(`Track error: ${pullData.tracks[0].errorDescription}`);
+                        }
+
+                        if (pullData.sessionDescription) {
+                            return pullData;
+                        }
+                        throw new Error('No session description in response');
+                    }
+                };
+
+                const pullData = await pullTrackWithRetry();
+
+                await peerConnection.setRemoteDescription({
+                    type: pullData.sessionDescription.type,
+                    sdp: pullData.sessionDescription.sdp
                 });
-
-                const pullText = await pullResponse.text();
-                console.log('Pull response status:', pullResponse.status);
-                console.log('Pull response:', pullText);
-
-                if (!pullResponse.ok) {
-                    throw new Error(`Failed to pull track: ${pullResponse.status} - ${pullText}`);
-                }
-
-                const pullData = JSON.parse(pullText);
-                console.log('Pull data:', pullData);
-
-                // Check for errors
-                if (pullData.tracks && pullData.tracks[0] && pullData.tracks[0].errorCode) {
-                    throw new Error(`Track error: ${pullData.tracks[0].errorDescription}`);
-                }
-
-                if (pullData.sessionDescription) {
-                    await peerConnection.setRemoteDescription({
-                        type: pullData.sessionDescription.type,
-                        sdp: pullData.sessionDescription.sdp
-                    });
-                    updateStatus('Video connected! Setting up control...', 'success');
-                    
-                    // Now setup control connection
-                    await setupControlConnection(appId, appSecret);
-                } else {
-                    throw new Error('No session description in response');
-                }
+                updateStatus('Video connected! Setting up control...', 'success');
+                
+                // Now setup control connection
+                await setupControlConnection(appId, appSecret);
 
             } catch (error) {
                 updateStatus(`Error: ${error.message}`, 'error');
