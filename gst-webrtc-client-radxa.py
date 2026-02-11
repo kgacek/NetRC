@@ -45,8 +45,8 @@ BITRATE = 2500000  # 2.5 Mbps for 720p
 # Low-latency tuning
 QUEUE_MAX_TIME_NS = 20_000_000  # 20 ms
 QUEUE_MAX_BUFFERS = 0
-APPsrc_HIGH_WATERMARK = 128 * 1024  # bytes
-APPsrc_LOW_WATERMARK = 64 * 1024    # bytes
+APPsrc_HIGH_WATERMARK = 1024 * 1024  # 1MB - increased to prevent premature drops
+APPsrc_LOW_WATERMARK = 512 * 1024   # 512KB
 
 class CarController:
     """
@@ -323,12 +323,9 @@ class GStreamerWebRTC:
     
     def create_pipeline(self):
         """Create GStreamer pipeline reading from rpicam-vid hardware encoder via FIFO"""
-        # GStreamer pipeline reads from FIFO (rpicam-vid already running)
-        # otwierasz FIFO do czytania w trybie binarnym (blokujące)
+        # Use filesrc to read directly from FIFO - simpler than appsrc
         pipeline_str = f"""
-        appsrc name=src is-live=true do-timestamp=true format=time block=false
-            caps=video/x-h264,stream-format=byte-stream,alignment=nal !
-        queue leaky=downstream max-size-time={QUEUE_MAX_TIME_NS} max-size-bytes=0 max-size-buffers={QUEUE_MAX_BUFFERS} !
+        filesrc location={self.fifo_path} !
         h264parse !
         video/x-h264,stream-format=avc,alignment=au,profile=baseline !
         rtph264pay pt=96 mtu=1200 config-interval=1 aggregate-mode=zero-latency !
@@ -343,11 +340,8 @@ class GStreamerWebRTC:
         self.pipe = Gst.parse_launch(pipeline_str)
         
         self.webrtc = self.pipe.get_by_name('sendrecv')
-        self.appsrc = self.pipe.get_by_name('src')
-        if self.appsrc:
-            self.appsrc.set_property('max-bytes', self.appsrc_max_bytes)
-            self.appsrc.set_property('min-latency', 0)
-            self.appsrc.set_property('max-latency', 0)
+        # No appsrc anymore - using filesrc
+        self.appsrc = None
         
         # Connect signals
         self.webrtc.connect('on-negotiation-needed', self.on_negotiation_needed)
@@ -736,8 +730,8 @@ class GStreamerWebRTC:
             
             # Schedule pipeline creation after rpicam-vid initializes
             logger.info("Scheduling pipeline creation in 2 seconds...")
-            GLib.timeout_add(2000, self.create_and_start_pipeline)
-            
+            GLib.timeout_add(2000, self.create_and_start_pipeline)            
+            # NO FIFO reader thread needed - filesrc reads FIFO directly            
         except Exception as e:
             logger.error(f"Initialization failed: {e}")
             self.main_loop.quit()
@@ -783,8 +777,7 @@ class GStreamerWebRTC:
             
             logger.info("Pipeline started successfully!")
 
-            # Start FIFO reader feeding appsrc
-            self.start_fifo_reader()
+            # filesrc reads FIFO directly - no need for FIFO reader thread
 
             # Trigger negotiation only after caps are negotiated
             GLib.timeout_add(500, self.check_rtp_caps_ready)
