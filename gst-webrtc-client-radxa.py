@@ -339,12 +339,7 @@ class GStreamerWebRTC:
         self.webrtc.connect('notify::ice-connection-state', self.on_ice_connection_state)
         self.webrtc.connect('notify::ice-gathering-state', self.on_ice_gathering_state)
         
-        # Add video transceiver explicitly - this creates sink_0 pad
-        caps = Gst.Caps.from_string("application/x-rtp,media=video,encoding-name=H264,payload=96")
-        self.transceiver = self.webrtc.emit('add-transceiver', GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY, caps)
-        logger.info(f"Added video transceiver: {self.transceiver}")
-        
-        # Now link rtph264pay to webrtcbin sink_0
+        # Get rtph264pay element
         pay = self.pipe.get_by_name('pay')
         if not pay:
             raise RuntimeError("rtph264pay element not found")
@@ -353,10 +348,10 @@ class GStreamerWebRTC:
         if not pay_src:
             raise RuntimeError("rtph264pay src pad not found")
         
-        # Request sink pad from webrtcbin
-        webrtc_sink = self.webrtc.get_request_pad('sink_0')
+        # Request sink pad from webrtcbin (this creates transceiver automatically)
+        webrtc_sink = self.webrtc.request_pad_simple('sink_%u')
         if not webrtc_sink:
-            raise RuntimeError("Could not get sink_0 pad from webrtcbin")
+            raise RuntimeError("Could not request sink pad from webrtcbin")
         
         logger.info(f"Linking {pay_src.get_name()} to {webrtc_sink.get_name()}")
         ret = pay_src.link(webrtc_sink)
@@ -364,6 +359,10 @@ class GStreamerWebRTC:
             raise RuntimeError(f"Failed to link pads: {ret}")
         
         logger.info("Linked rtph264pay to webrtcbin")
+        
+        # Get transceiver that was auto-created
+        self.transceiver = webrtc_sink.get_property('transceiver')
+        logger.info(f"Auto-created transceiver: {self.transceiver}")
         
         # Setup FPS monitoring
         self.setup_fps_probe()
