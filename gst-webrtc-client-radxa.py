@@ -593,12 +593,29 @@ class GStreamerWebRTC:
             return
 
         src_pad.add_probe(Gst.PadProbeType.BUFFER, self.on_frame_buffer)
+        
+        # Also probe rtph264pay output to see if RTP packets are being sent
+        pay = self.pipe.get_by_name('rtph264pay0')
+        if pay:
+            pay_src = pay.get_static_pad('src')
+            if pay_src:
+                pay_src.add_probe(Gst.PadProbeType.BUFFER, self.on_rtp_buffer)
+                logger.info("Added RTP buffer probe on rtph264pay")
+        
         GLib.timeout_add_seconds(1, self.report_fps)
 
     def on_frame_buffer(self, pad, info):
         """Count H.264 frame buffers to estimate FPS"""
         if info.type & Gst.PadProbeType.BUFFER:
             self.fps_count += 1
+        return Gst.PadProbeReturn.OK
+    
+    def on_rtp_buffer(self, pad, info):
+        """Count RTP packets from rtph264pay"""
+        if info.type & Gst.PadProbeType.BUFFER:
+            if not hasattr(self, 'rtp_packet_count'):
+                self.rtp_packet_count = 0
+            self.rtp_packet_count += 1
         return Gst.PadProbeReturn.OK
 
     def report_fps(self):
@@ -607,7 +624,10 @@ class GStreamerWebRTC:
         elapsed = now - self.fps_last_time
         if elapsed > 0:
             fps = self.fps_count / elapsed
-            logger.info(f"Measured RTP FPS: {fps:.1f}")
+            rtp_count = getattr(self, 'rtp_packet_count', 0)
+            logger.info(f"Measured H264 FPS: {fps:.1f}, RTP packets/sec: {rtp_count}")
+            self.rtp_packet_count = 0
+                    
         self.fps_count = 0
         self.fps_last_time = now
         return True
