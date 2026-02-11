@@ -323,6 +323,7 @@ class GStreamerWebRTC:
         self.sps_pps_needed = False
         self.drop_count = 0
         self.stats_poll_id = None
+        self.ice_candidate_count = 0
     
     def create_pipeline(self):
         """Create GStreamer pipeline reading from rpicam-vid hardware encoder via FIFO"""
@@ -421,6 +422,8 @@ class GStreamerWebRTC:
     
     def on_ice_candidate(self, element, mlineindex, candidate):
         """Handle ICE candidate - not needed with ice-lite server"""
+        self.ice_candidate_count += 1
+        logger.info(f"ICE candidate #{self.ice_candidate_count}: mline={mlineindex}")
         logger.debug(f"ICE candidate: {candidate}")
     
     def on_webrtc_pad_added(self, element, pad):
@@ -460,6 +463,8 @@ class GStreamerWebRTC:
         """Monitor ICE gathering state"""
         state = element.get_property('ice-gathering-state')
         logger.info(f"ICE gathering state: {state}")
+        if state == GstWebRTC.WebRTCICEGatheringState.COMPLETE and self.ice_candidate_count == 0:
+            logger.warning("ICE gathering completed but no candidates were generated")
     
     def on_ice_connection_state(self, element, pspec):
         """Monitor ICE connection state"""
