@@ -11,6 +11,9 @@ gi.require_version('GstRtp', '1.0')
 gi.require_version('GstApp', '1.0')
 from gi.repository import Gst, GstWebRTC, GstSdp, GstRtp, GstApp, GLib
 import json
+import base64
+import hmac
+import hashlib
 import re
 import os
 import sys
@@ -37,6 +40,9 @@ SIGNALING_SERVER = os.getenv('SIGNALING_SERVER', 'https://79-76-127-159.nip.io')
 TURN_URL = os.getenv('TURN_URL')
 TURN_USER = os.getenv('TURN_USER')
 TURN_PASS = os.getenv('TURN_PASS')
+CF_TURN_KEY_ID = os.getenv('CF_TURN_KEY_ID')
+CF_TURN_TOKEN = os.getenv('CF_TURN_TOKEN')
+TURN_TTL_SECONDS = int(os.getenv('TURN_TTL_SECONDS', '3600'))
 
 # UART configuration for car control
 UART_DEV = os.getenv('UART_DEV', '/dev/ttyS0')
@@ -329,6 +335,21 @@ class GStreamerWebRTC:
         self.drop_count = 0
         self.stats_poll_id = None
         self.ice_candidate_count = 0
+
+    def build_turn_credentials(self):
+        """Generate TURN credentials for Cloudflare TURN (HMAC-SHA1)."""
+        if not CF_TURN_KEY_ID or not CF_TURN_TOKEN:
+            return None, None
+
+        expiry = int(time.time()) + TURN_TTL_SECONDS
+        username = f"{expiry}:{CF_TURN_KEY_ID}"
+        digest = hmac.new(
+            CF_TURN_TOKEN.encode('utf-8'),
+            username.encode('utf-8'),
+            hashlib.sha1
+        ).digest()
+        password = base64.b64encode(digest).decode('utf-8')
+        return username, password
     
     def create_pipeline(self):
         """Create GStreamer pipeline reading from rpicam-vid hardware encoder via FIFO"""
@@ -368,9 +389,13 @@ class GStreamerWebRTC:
         self.webrtc.connect('pad-added', self.on_webrtc_pad_added)
 
         # Configure TURN if provided
-        if TURN_URL and TURN_USER and TURN_PASS:
+        turn_user, turn_pass = (TURN_USER, TURN_PASS)
+        if not (turn_user and turn_pass):
+            turn_user, turn_pass = self.build_turn_credentials()
+
+        if TURN_URL and turn_user and turn_pass:
             try:
-                turn_uri = f"turn://{TURN_USER}:{TURN_PASS}@{TURN_URL}"
+                turn_uri = f"turn://{turn_user}:{turn_pass}@{TURN_URL}"
                 self.webrtc.set_property('turn-server', turn_uri)
                 logger.info("webrtcbin TURN server configured")
             except Exception as e:
