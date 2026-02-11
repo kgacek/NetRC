@@ -356,14 +356,8 @@ class GStreamerWebRTC:
         self.webrtc.connect('notify::ice-gathering-state', self.on_ice_gathering_state)
         self.webrtc.connect('pad-added', self.on_webrtc_pad_added)
         
-        # Add video transceiver explicitly (fixes missing media section in SDP)
-        caps = Gst.Caps.from_string("application/x-rtp,media=video,encoding-name=H264,payload=96")
-        self.transceiver = self.webrtc.emit('add-transceiver', GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY, caps)
-        logger.info(f"Added video transceiver: {self.transceiver}")
-        
-        # Monitor transceiver for when sender is ready
-        if self.transceiver:
-            self.transceiver.connect('notify::sender', self.on_transceiver_sender_ready)
+        # Don't add transceiver explicitly - it's created automatically when rtph264pay links to webrtcbin
+        # Adding it manually causes duplicate transceivers (video0 and video1 in SDP)
         
         # Flag to track if negotiation has been started
         self.negotiation_started = False
@@ -417,13 +411,6 @@ class GStreamerWebRTC:
         if not self.negotiation_started:
             logger.info("RTP pad connected, triggering negotiation in 1 second...")
             GLib.timeout_add(1000, self.trigger_negotiation)
-    
-    def on_transceiver_sender_ready(self, transceiver, pspec):
-        """Called when transceiver sender is ready"""
-        sender = transceiver.get_property('sender')
-        if sender and not self.negotiation_started:
-            logger.info(f"Transceiver sender ready, triggering negotiation...")
-            GLib.timeout_add(500, self.trigger_negotiation)
     
     def on_ice_gathering_state(self, element, pspec):
         """Monitor ICE gathering state"""
