@@ -918,10 +918,10 @@ class GStreamerWebRTC:
         self.nal_push_count += 1
         
         if self.nal_push_count % 50 == 0:
-            logger.info(f"Pushed {self.nal_push_count} NALs to appsrc. Types: {self.nal_counts}. Return: {ret}")
+            logger.info(f"Pushed {self.nal_push_count} NALs to appsrc. Types: {self.nal_counts}. Last return: {ret}")
         
         if ret != Gst.FlowReturn.OK:
-            logger.warning(f"appsrc push-buffer returned {ret} for NAL type {nal_type}")
+            logger.warning(f"appsrc push-buffer returned {ret} for NAL type {nal_type}, count={self.nal_push_count}")
 
     def _push_cached_parameter_sets(self):
         """Push cached SPS/PPS before IDR if available"""
