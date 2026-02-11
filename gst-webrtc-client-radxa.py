@@ -308,6 +308,7 @@ class GStreamerWebRTC:
         self.rpicam_process = None
         self.rpicam_restart_count = 0
         self.fps_count = 0
+        self.rtp_pps_count = 0
         self.fps_last_time = time.monotonic()
         self.appsrc = None
         self.reader_thread = None
@@ -624,7 +625,7 @@ class GStreamerWebRTC:
         return True
 
     def setup_fps_probe(self):
-        """Attach a buffer probe to measure real FPS"""
+        """Attach buffer probes to measure H.264 FPS and RTP PPS"""
         parser = self.pipe.get_by_name('h264parse0')
         if not parser:
             logger.warning("h264parse element not found for FPS probe")
@@ -636,12 +637,24 @@ class GStreamerWebRTC:
             return
 
         src_pad.add_probe(Gst.PadProbeType.BUFFER, self.on_frame_buffer)
+
+        pay = self.pipe.get_by_name('rtph264pay0')
+        if pay:
+            pay_src = pay.get_static_pad('src')
+            if pay_src:
+                pay_src.add_probe(Gst.PadProbeType.BUFFER, self.on_rtp_buffer)
         GLib.timeout_add_seconds(1, self.report_fps)
 
     def on_frame_buffer(self, pad, info):
-        """Count H.264 frame buffers to estimate FPS"""
+        """Count H.264 frame buffers to estimate FPS (pre-RTP)"""
         if info.type & Gst.PadProbeType.BUFFER:
             self.fps_count += 1
+        return Gst.PadProbeReturn.OK
+
+    def on_rtp_buffer(self, pad, info):
+        """Count RTP packets leaving rtph264pay"""
+        if info.type & Gst.PadProbeType.BUFFER:
+            self.rtp_pps_count += 1
         return Gst.PadProbeReturn.OK
 
     def report_fps(self):
@@ -650,8 +663,10 @@ class GStreamerWebRTC:
         elapsed = now - self.fps_last_time
         if elapsed > 0:
             fps = self.fps_count / elapsed
-            logger.info(f"Measured RTP FPS: {fps:.1f}")
+            pps = self.rtp_pps_count / elapsed
+            logger.info(f"Measured H264 FPS (pre-RTP): {fps:.1f} | RTP PPS: {pps:.1f}")
         self.fps_count = 0
+        self.rtp_pps_count = 0
         self.fps_last_time = now
         return True
 
