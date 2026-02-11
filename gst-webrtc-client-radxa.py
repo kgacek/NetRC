@@ -592,21 +592,29 @@ class GStreamerWebRTC:
         if not self.webrtc:
             return True
 
-        promise = Gst.Promise.new_with_change_func(self.on_webrtc_stats, None, None)
+        logger.info("Polling WebRTC stats...")
+        promise = Gst.Promise.new()
         try:
             # None => all stats
             self.webrtc.emit('get-stats', None, promise)
         except Exception as e:
             logger.debug(f"get-stats not available: {e}")
+            return True
+
+        def _wait_stats():
+            self.on_webrtc_stats_sync(promise)
+
+        threading.Thread(target=_wait_stats, daemon=True).start()
         return True
 
-    def on_webrtc_stats(self, promise, _unused, _):
-        """Handle webrtcbin stats promise"""
+    def on_webrtc_stats_sync(self, promise):
+        """Handle webrtcbin stats promise (blocking wait in background thread)"""
         try:
             promise.wait()
             reply = promise.get_reply()
             stats = reply.get_value('stats') if reply else None
             if not stats:
+                logger.info("WebRTC stats empty")
                 return
 
             stats_str = stats.to_string()
