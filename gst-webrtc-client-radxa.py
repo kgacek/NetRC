@@ -569,6 +569,8 @@ class GStreamerWebRTC:
         if ret == Gst.StateChangeReturn.FAILURE:
             logger.error("Failed to start pipeline")
             sys.exit(1)
+        elif ret == Gst.StateChangeReturn.ASYNC:
+            logger.info("Pipeline state change is ASYNC, waiting...")
         
         logger.info(f"Pipeline started: {ret}")
         
@@ -578,8 +580,8 @@ class GStreamerWebRTC:
         # Monitor pipeline stats
         GLib.timeout_add_seconds(5, self.print_stats)
         
-        # Trigger negotiation after pipeline is running
-        GLib.timeout_add(2000, self.trigger_negotiation)
+        # Trigger negotiation after linking
+        GLib.timeout_add(3000, self.trigger_negotiation)
     
     def delayed_link(self):
         """Link rtph264pay to webrtcbin after pipeline is running"""
