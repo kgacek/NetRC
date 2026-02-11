@@ -347,7 +347,7 @@ class GStreamerWebRTC:
 
         try:
             response = requests.post(url, headers=headers, json=payload, timeout=5)
-            if response.status_code != 200:
+            if response.status_code not in (200, 201):
                 logger.warning(f"TURN credentials fetch failed: {response.status_code} - {response.text}")
                 return None, None, None
 
