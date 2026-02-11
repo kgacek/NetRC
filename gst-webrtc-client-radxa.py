@@ -628,7 +628,7 @@ class GStreamerWebRTC:
         
         try:
             response = requests.post(url, headers=headers, json=payload, timeout=10)
-            if response.status_code != 200:
+            if response.status_code not in (200, 201):
                 logger.error(f"Failed to send offer: {response.status_code} - {response.text}")
                 return
             
