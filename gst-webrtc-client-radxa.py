@@ -742,7 +742,8 @@ class GStreamerWebRTC:
         """Start v4l2src with Rockchip MPP encoder (replaces rpicam-vid)"""
         import subprocess
 
-        if self.rpicam_process and self.rpicam_process.poll() is not None:
+        if self.rpicam_process and self.rpicam_process.poll() is None:
+            # Process still running
             return
 
         # FIFO should already exist
@@ -765,7 +766,23 @@ class GStreamerWebRTC:
             'video/x-h264,stream-format=byte-stream,alignment=nal', '!',
             'filesink', f'location={self.fifo_path}', 'sync=false'
         ], stdout=subprocess.DEVNULL, stderr=stderr_log)
-        logger.info(f"Started v4l2src+mpph264enc: {WIDTH}x{HEIGHT} @ {FRAMERATE}fps, {BITRATE/1000000}Mbps")
+        logger.info(f"Started v4l2src+mpph264enc PID={self.rpicam_process.pid}: {WIDTH}x{HEIGHT} @ {FRAMERATE}fps, {BITRATE/1000000}Mbps")
+        
+    def monitor_rpicam(self):
+        """Check if gst-launch is still running and restart if needed"""
+        if not self.rpicam_process:
+            return True
+            
+        poll = self.rpicam_process.poll()
+        if poll is not None:
+            # Process ended
+            logger.warning(f"gst-launch process ended with code {poll}, restarting...")
+            self.rpicam_restart_count += 1
+            if self.rpicam_restart_count > 10:
+                logger.error("Too many gst-launch restarts, giving up")
+                return False
+            self.start_rpicam()
+        return True
     
     def create_and_start_pipeline(self):
         """Create and start GStreamer pipeline (called after rpicam-vid delay)"""
@@ -779,6 +796,9 @@ class GStreamerWebRTC:
             logger.info("Pipeline started successfully!")
 
             # filesrc reads FIFO directly - no need for FIFO reader thread
+
+            # Start monitoring gst-launch process (check every 2 seconds)
+            GLib.timeout_add_seconds(2, self.monitor_rpicam)
 
             # Trigger negotiation only after caps are negotiated
             GLib.timeout_add(500, self.check_rtp_caps_ready)
