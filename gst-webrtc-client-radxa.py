@@ -435,6 +435,10 @@ class GStreamerWebRTC:
         self.webrtc.connect('notify::ice-connection-state', self.on_ice_connection_state)
         self.webrtc.connect('notify::ice-gathering-state', self.on_ice_gathering_state)
         self.webrtc.connect('notify::connection-state', self.on_connection_state)
+        try:
+            self.webrtc.connect('notify::dtls-connection-state', self.on_dtls_connection_state)
+        except Exception:
+            pass
         self.webrtc.connect('pad-added', self.on_webrtc_pad_added)
 
         # Watch bus messages for DTLS/SRTP/ICE issues
@@ -592,6 +596,13 @@ class GStreamerWebRTC:
         """Monitor overall WebRTC connection state"""
         state = element.get_property('connection-state')
         logger.info(f"WebRTC connection state: {state}")
+
+    def on_dtls_connection_state(self, element, pspec):
+        try:
+            state = element.get_property('dtls-connection-state')
+            logger.info(f"DTLS connection state: {state}")
+        except Exception:
+            pass
 
     def on_bus_message(self, bus, message):
         mtype = message.type
