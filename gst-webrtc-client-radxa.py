@@ -354,11 +354,10 @@ class GStreamerWebRTC:
         self.webrtc.connect('notify::ice-gathering-state', self.on_ice_gathering_state)
         self.webrtc.connect('pad-added', self.on_webrtc_pad_added)
         
-        # DON'T add transceiver manually - let rtph264pay request the pad automatically
-        # This prevents duplicate video tracks in SDP (video0 + video1)
-        # caps = Gst.Caps.from_string("application/x-rtp,media=video,encoding-name=H264,payload=96")
-        # self.transceiver = self.webrtc.emit('add-transceiver', GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY, caps)
-        # logger.info(f"Added video transceiver: {self.transceiver}")
+        # Add transceiver with SENDONLY direction (Cloudflare expects sendonly, not sendrecv)
+        caps = Gst.Caps.from_string("application/x-rtp,media=video,encoding-name=H264,payload=96")
+        self.transceiver = self.webrtc.emit('add-transceiver', GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY, caps)
+        logger.info(f"Added SENDONLY video transceiver: {self.transceiver}")
         
         # Flag to track if negotiation has been started
         self.negotiation_started = False
