@@ -348,8 +348,8 @@ class GStreamerWebRTC:
         if not pay_src:
             raise RuntimeError("rtph264pay src pad not found")
         
-        # Request sink pad from webrtcbin (this creates transceiver automatically)
-        webrtc_sink = self.webrtc.request_pad_simple('sink_%u')
+        # Request sink pad from webrtcbin using old API (GStreamer 1.18)
+        webrtc_sink = self.webrtc.get_request_pad('sink_%u')
         if not webrtc_sink:
             raise RuntimeError("Could not request sink pad from webrtcbin")
         
