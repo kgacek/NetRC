@@ -312,6 +312,7 @@ class GStreamerWebRTC:
         # Note: Direct NV12->mpph264enc causes RGA errors, need I420 conversion
         
         pipeline_str = f"""
+        webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.cloudflare.com:3478
         v4l2src device=/dev/video0 !
         video/x-raw,format=NV12,width={WIDTH},height={HEIGHT},framerate={FRAMERATE}/1 !
         videoconvert !
@@ -321,7 +322,7 @@ class GStreamerWebRTC:
         h264parse config-interval=1 !
         video/x-h264,stream-format=avc,alignment=au,profile=baseline !
         rtph264pay pt=96 mtu=1200 config-interval=1 aggregate-mode=zero-latency !
-        webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.cloudflare.com:3478
+        sendrecv.
         """
         
         logger.info("Creating GStreamer pipeline (Radxa Zero 3W with Rockchip MPP)")
