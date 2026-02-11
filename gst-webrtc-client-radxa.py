@@ -739,7 +739,7 @@ class GStreamerWebRTC:
             'rc-mode=cbr', 'profile=baseline', 'header-mode=each-idr', '!',
             'h264parse', '!',
             'video/x-h264,stream-format=byte-stream,alignment=nal', '!',
-            'filesink', f'location={self.fifo_path}'
+            'filesink', f'location={self.fifo_path}', 'sync=false'
         ], stdout=subprocess.DEVNULL, stderr=stderr_log)
         logger.info(f"Started v4l2src+mpph264enc: {WIDTH}x{HEIGHT} @ {FRAMERATE}fps, {BITRATE/1000000}Mbps")
     
