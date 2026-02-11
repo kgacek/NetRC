@@ -321,7 +321,6 @@ class GStreamerWebRTC:
         h264parse config-interval=1 !
         video/x-h264,stream-format=avc,alignment=au,profile=baseline !
         rtph264pay pt=96 mtu=1200 config-interval=1 aggregate-mode=zero-latency !
-        application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000 !
         webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.cloudflare.com:3478
         """
         
