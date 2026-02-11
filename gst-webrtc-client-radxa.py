@@ -307,6 +307,7 @@ async def run_control_subscriber(car_controller, control_session_id):
 class GStreamerWebRTC:
     def __init__(self):
         Gst.init(None)
+        self.enable_gst_debug()
         self.log_gst_versions()
         self.pipe = None
         self.webrtc = None
@@ -354,6 +355,15 @@ class GStreamerWebRTC:
                 )
         except Exception as e:
             logger.warning(f"Failed to read plugin versions: {e}")
+
+    def enable_gst_debug(self):
+        if os.getenv("GST_DEBUG_WEBRTC") != "1":
+            return
+        try:
+            Gst.debug_set_threshold_from_string("webrtcbin:6,dtls:6,srtp:6,nice:6,libnice:6", True)
+            logger.info("Enabled GStreamer debug for webrtc/dtls/srtp/nice")
+        except Exception as e:
+            logger.warning(f"Failed to enable GStreamer debug: {e}")
 
     def fetch_turn_credentials(self):
         """Fetch TURN credentials from Cloudflare TURN API."""
