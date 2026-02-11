@@ -785,17 +785,24 @@ class GStreamerWebRTC:
     def _fifo_reader_loop(self):
         """Read H.264 byte-stream from FIFO, split by start codes, push to appsrc"""
         buffer = bytearray()
+        read_count = 0
 
         while not self.reader_stop.is_set():
             try:
+                logger.info(f"Opening FIFO {self.fifo_path} for reading...")
                 with open(self.fifo_path, 'rb', buffering=0) as fifo:
+                    logger.info("FIFO opened successfully")
                     while not self.reader_stop.is_set():
                         chunk = fifo.read(4096)
                         if not chunk:
-                            time.sleep(0.005)
-                            continue
+                            logger.debug("FIFO read returned empty, possibly EOF")
+                            break  # EOF from gst-launch, re-open FIFO
+                        read_count += 1
+                        if read_count % 100 == 0:
+                            logger.info(f"FIFO read count: {read_count}, buffer size: {len(buffer)}")
                         buffer.extend(chunk)
                         self._drain_nals(buffer)
+                logger.info("FIFO closed (EOF), will re-open...")
             except Exception as e:
                 logger.warning(f"FIFO reader error: {e}")
                 time.sleep(0.1)
