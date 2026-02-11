@@ -332,6 +332,7 @@ class GStreamerWebRTC:
         h264parse !
         video/x-h264,stream-format=avc,alignment=au,profile=baseline !
         rtph264pay pt=96 mtu=1200 config-interval=1 aggregate-mode=zero-latency !
+        queue leaky=downstream max-size-time=20000000 max-size-buffers=0 max-size-bytes=0 !
         application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000 !
         webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.cloudflare.com:3478
         """
@@ -740,23 +741,18 @@ class GStreamerWebRTC:
         
         # Start rpicam-vid with hardware encoding in background
         self.rpicam_process = subprocess.Popen([
-            'rpicam-vid',
-            '--width', str(WIDTH),
-            '--height', str(HEIGHT),
-            '--framerate', str(FRAMERATE),
-            '--intra', str(FRAMERATE),  # Keyframe interval equal to framerate for 1 second GOP
-            '--codec', 'h264',
-            '--profile', 'baseline',
-            '--level', '4',
-            '--bitrate', str(BITRATE),
-            '--inline',              # SPS/PPS in every keyframe
-            '--flush',               # Low latency
-            '--timeout', '0',        # Run indefinitely
-            '--nopreview',           # No preview
-            #'--denoise', 'cdn_off',  # Disable denoise for lower latency
-            '-o', self.fifo_path
+            'gst-launch-1.0', '-e',
+            'v4l2src', 'device=/dev/video0', '!',
+            f'video/x-raw,format=NV12,width={WIDTH},height={HEIGHT},framerate={FRAMERATE}/1', '!',
+            'videoconvert', '!',
+            'video/x-raw,format=I420', '!',
+            'mpph264enc', f'bps={BITRATE}', f'bps-max={BITRATE}', f'gop={FRAMERATE}', 
+            'rc-mode=cbr', 'profile=baseline', 'header-mode=each-idr', '!',
+            'h264parse', '!',
+            'video/x-h264,stream-format=byte-stream,alignment=nal', '!',
+            'filesink', f'location={self.fifo_path}'
         ], stdout=subprocess.DEVNULL, stderr=stderr_log)
-        logger.info(f"Started rpicam-vid: {WIDTH}x{HEIGHT} @ {FRAMERATE}fps, {BITRATE/1000000}Mbps")
+        logger.info(f"Started v4l2src+mpph264enc: {WIDTH}x{HEIGHT} @ {FRAMERATE}fps, {BITRATE/1000000}Mbps")
     
     def create_and_start_pipeline(self):
         """Create and start GStreamer pipeline (called after rpicam-vid delay)"""

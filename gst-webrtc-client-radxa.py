@@ -488,6 +488,11 @@ class GStreamerWebRTC:
                 sdp = sdp.replace("a=sendrecv\r\n", "a=sendonly\r\n")
                 sdp = sdp.replace("a=sendrecv\n", "a=sendonly\n")
 
+            # If we're embedding candidates in SDP, strip trickle hint
+            if "a=ice-options:trickle" in sdp:
+                sdp = sdp.replace("a=ice-options:trickle\r\n", "")
+                sdp = sdp.replace("a=ice-options:trickle\n", "")
+
             logger.info("Sending offer to Cloudflare (ice-lite mode)...")
             self.send_offer_to_cloudflare(sdp)
 
@@ -634,6 +639,13 @@ class GStreamerWebRTC:
             
             data = response.json()
             logger.info("Received answer from Cloudflare")
+
+            answer_sdp = data['sessionDescription']['sdp']
+            logger.info(f"Answer SDP (first 400 chars):\n{answer_sdp[:400]}")
+            if "a=inactive" in answer_sdp:
+                logger.warning("Answer SDP has a=inactive for video")
+            if "a=recvonly" not in answer_sdp and "a=sendrecv" not in answer_sdp:
+                logger.warning("Answer SDP missing recvonly/sendrecv for video")
             
             # Print session info on first successful connection
             if not hasattr(self, '_session_info_printed'):
@@ -646,7 +658,6 @@ class GStreamerWebRTC:
                 self._session_info_printed = True
             
             # Set remote description in GLib thread
-            answer_sdp = data['sessionDescription']['sdp']
             GLib.idle_add(self.set_remote_description, answer_sdp)
         except Exception as e:
             logger.error(f"Error sending offer: {e}")
