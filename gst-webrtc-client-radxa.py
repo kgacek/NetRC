@@ -355,6 +355,9 @@ class GStreamerWebRTC:
         self.webrtc.set_property('bundle-policy', GstWebRTC.WebRTCBundlePolicy.MAX_BUNDLE)
         self.webrtc.set_property('stun-server', 'stun://stun.cloudflare.com:3478')
         
+        # Block negotiation until we're ready
+        self.negotiation_blocked = True
+        
         # Add all elements to pipeline
         self.pipe.add(v4l2src)
         self.pipe.add(capsfilter1)
@@ -420,6 +423,9 @@ class GStreamerWebRTC:
         
     def on_negotiation_needed(self, element):
         """Handle negotiation needed"""
+        if self.negotiation_blocked:
+            logger.info("Negotiation needed but blocked, waiting for manual trigger")
+            return
         if self.negotiation_started:
             logger.info("Negotiation already started, ignoring.")
             return
@@ -594,6 +600,9 @@ class GStreamerWebRTC:
         GLib.timeout_add(3000, self.trigger_negotiation)
     
     def delayed_link(self):
+            # Unblock negotiation after linking
+            self.negotiation_blocked = False
+            logger.info("Unblocked negotiation, will trigger manually in 500ms")
         """Link rtph264pay to webrtcbin after pipeline is running"""
         try:
             self.link_to_webrtc()
@@ -606,8 +615,14 @@ class GStreamerWebRTC:
         """Trigger WebRTC negotiation"""
         if self.negotiation_started:
             return False
-        logger.info("Triggering negotiation...")
-        self.on_negotiation_needed(self.webrtc)
+        if self.negotiation_blocked:
+            logger.warning("Cannot trigger negotiation - still blocked")
+            return False
+        logger.info("Manually triggering negotiation...")
+        self.negotiation_blocked = False  # Ensure unblocked
+        self.negotiation_started = True
+        promise = Gst.Promise.new_with_change_func(self.on_offer_created, self.webrtc, None)
+        self.webrtc.emit('create-offer', None, promise)
         return False
     
     def setup_fps_probe(self):
