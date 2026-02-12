@@ -398,6 +398,7 @@ class GStreamerWebRTC:
         rtph264pay pt=96 mtu=1200 config-interval=1 aggregate-mode=zero-latency !
         queue leaky=downstream max-size-time={QUEUE_MAX_TIME_NS} max-size-buffers=0 max-size-bytes=0 !
         application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000 !
+        sendrecv.
         webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.cloudflare.com:3478
         """
 
