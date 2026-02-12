@@ -389,24 +389,85 @@ class GStreamerWebRTC:
     
     def create_pipeline(self):
         """Create GStreamer pipeline: v4l2src -> mpph264enc -> webrtcbin"""
-        pipeline_str = f"""
-        webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.cloudflare.com:3478
-        v4l2src device=/dev/video0 io-mode=mmap !
-        video/x-raw,format=NV12,width={WIDTH},height={HEIGHT},framerate={FRAMERATE}/1 !
-        mpph264enc bps={BITRATE} bps-max={BITRATE} gop={FRAMERATE} rc-mode=cbr profile=baseline header-mode=each-idr !
-        h264parse !
-        video/x-h264,stream-format=avc,alignment=au,profile=baseline !
-        rtph264pay pt=96 mtu=1200 config-interval=1 aggregate-mode=zero-latency !
-        queue leaky=downstream max-size-time={QUEUE_MAX_TIME_NS} max-size-buffers=0 max-size-bytes=0 !
-        application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000 !
-        sendrecv.
-        """
-
         logger.info("Creating GStreamer pipeline (v4l2src -> mpph264enc -> webrtcbin)")
 
-        self.pipe = Gst.parse_launch(pipeline_str)
+        self.pipe = Gst.Pipeline.new("pipeline0")
 
-        self.webrtc = self.pipe.get_by_name('sendrecv')
+        v4l2src = Gst.ElementFactory.make("v4l2src", "v4l2src0")
+        caps_raw = Gst.ElementFactory.make("capsfilter", "caps_raw")
+        enc = Gst.ElementFactory.make("mpph264enc", "mpph264enc0")
+        h264parse = Gst.ElementFactory.make("h264parse", "h264parse0")
+        caps_h264 = Gst.ElementFactory.make("capsfilter", "caps_h264")
+        pay = Gst.ElementFactory.make("rtph264pay", "rtph264pay0")
+        queue = Gst.ElementFactory.make("queue", "queue0")
+        caps_rtp = Gst.ElementFactory.make("capsfilter", "caps_rtp")
+        self.webrtc = Gst.ElementFactory.make("webrtcbin", "sendrecv")
+
+        if not all([v4l2src, caps_raw, enc, h264parse, caps_h264, pay, queue, caps_rtp, self.webrtc]):
+            raise RuntimeError("Failed to create GStreamer elements")
+
+        v4l2src.set_property("device", "/dev/video0")
+        v4l2src.set_property("io-mode", 2)  # mmap
+
+        caps_raw.set_property(
+            "caps",
+            Gst.Caps.from_string(
+                f"video/x-raw,format=NV12,width={WIDTH},height={HEIGHT},framerate={FRAMERATE}/1"
+            ),
+        )
+
+        enc.set_property("bps", BITRATE)
+        enc.set_property("bps-max", BITRATE)
+        enc.set_property("gop", FRAMERATE)
+        enc.set_property("rc-mode", "cbr")
+        enc.set_property("profile", "baseline")
+        enc.set_property("header-mode", "each-idr")
+
+        caps_h264.set_property(
+            "caps",
+            Gst.Caps.from_string("video/x-h264,stream-format=avc,alignment=au,profile=baseline"),
+        )
+
+        pay.set_property("pt", 96)
+        pay.set_property("mtu", 1200)
+        pay.set_property("config-interval", 1)
+        pay.set_property("aggregate-mode", "zero-latency")
+
+        queue.set_property("leaky", 2)  # downstream
+        queue.set_property("max-size-time", QUEUE_MAX_TIME_NS)
+        queue.set_property("max-size-buffers", 0)
+        queue.set_property("max-size-bytes", 0)
+
+        caps_rtp.set_property(
+            "caps",
+            Gst.Caps.from_string(
+                "application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000"
+            ),
+        )
+
+        self.webrtc.set_property("bundle-policy", "max-bundle")
+        self.webrtc.set_property("stun-server", "stun://stun.cloudflare.com:3478")
+
+        self.pipe.add(v4l2src)
+        self.pipe.add(caps_raw)
+        self.pipe.add(enc)
+        self.pipe.add(h264parse)
+        self.pipe.add(caps_h264)
+        self.pipe.add(pay)
+        self.pipe.add(queue)
+        self.pipe.add(caps_rtp)
+        self.pipe.add(self.webrtc)
+
+        if not Gst.Element.link_many(v4l2src, caps_raw, enc, h264parse, caps_h264, pay, queue, caps_rtp):
+            raise RuntimeError("Failed to link encoder pipeline")
+
+        # Link RTP to webrtcbin request pad
+        rtp_src_pad = caps_rtp.get_static_pad("src")
+        webrtc_sink_pad = self.webrtc.get_request_pad("sink_%u")
+        if not rtp_src_pad or not webrtc_sink_pad:
+            raise RuntimeError("Failed to get pads for webrtcbin link")
+        if rtp_src_pad.link(webrtc_sink_pad) != Gst.PadLinkReturn.OK:
+            raise RuntimeError("Failed to link RTP to webrtcbin")
         
         # Connect signals
         self.webrtc.connect('on-negotiation-needed', self.on_negotiation_needed)
