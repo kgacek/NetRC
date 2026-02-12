@@ -315,23 +315,10 @@ class GStreamerWebRTC:
         self.car_controller = None
         self.control_session_id = None
         self.pc_control = None
-        self.fifo_path = '/tmp/h264_fifo'
-        self.rpicam_process = None
         self.rpicam_restart_count = 0
         self.fps_count = 0
         self.rtp_pps_count = 0
         self.fps_last_time = time.monotonic()
-        self.appsrc = None
-        self.reader_thread = None
-        self.reader_stop = threading.Event()
-        self.drop_until_idr = False
-        self.appsrc_max_bytes = APPsrc_HIGH_WATERMARK
-        self.drop_high_watermark = APPsrc_HIGH_WATERMARK
-        self.drop_low_watermark = APPsrc_LOW_WATERMARK
-        self.cached_sps = None
-        self.cached_pps = None
-        self.sps_pps_needed = False
-        self.drop_count = 0
         self.stats_poll_id = None
         self.ice_candidate_count = 0
 
@@ -401,33 +388,24 @@ class GStreamerWebRTC:
             return None, None, None
     
     def create_pipeline(self):
-        """Create GStreamer pipeline reading from rpicam-vid hardware encoder via FIFO"""
-        # GStreamer pipeline reads from FIFO (rpicam-vid already running)
-        # otwierasz FIFO do czytania w trybie binarnym (blokujące)
+        """Create GStreamer pipeline: v4l2src -> mpph264enc -> webrtcbin"""
         pipeline_str = f"""
-        appsrc name=src is-live=true do-timestamp=true format=time block=false
-            caps=video/x-h264,stream-format=byte-stream,alignment=nal !
-        queue leaky=downstream max-size-time={QUEUE_MAX_TIME_NS} max-size-bytes=0 max-size-buffers={QUEUE_MAX_BUFFERS} !
+        v4l2src device=/dev/video0 io-mode=mmap !
+        video/x-raw,format=NV12,width={WIDTH},height={HEIGHT},framerate={FRAMERATE}/1 !
+        mpph264enc bps={BITRATE} bps-max={BITRATE} gop={FRAMERATE} rc-mode=cbr profile=baseline header-mode=each-idr !
         h264parse !
         video/x-h264,stream-format=avc,alignment=au,profile=baseline !
         rtph264pay pt=96 mtu=1200 config-interval=1 aggregate-mode=zero-latency !
-        queue leaky=downstream max-size-time=20000000 max-size-buffers=0 max-size-bytes=0 !
+        queue leaky=downstream max-size-time={QUEUE_MAX_TIME_NS} max-size-buffers=0 max-size-bytes=0 !
         application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000 !
         webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.cloudflare.com:3478
         """
 
+        logger.info("Creating GStreamer pipeline (v4l2src -> mpph264enc -> webrtcbin)")
 
-        
-        logger.info("Creating GStreamer pipeline (reading from rpicam-vid FIFO)")
-        
         self.pipe = Gst.parse_launch(pipeline_str)
-        
+
         self.webrtc = self.pipe.get_by_name('sendrecv')
-        self.appsrc = self.pipe.get_by_name('src')
-        if self.appsrc:
-            self.appsrc.set_property('max-bytes', self.appsrc_max_bytes)
-            self.appsrc.set_property('min-latency', 0)
-            self.appsrc.set_property('max-latency', 0)
         
         # Connect signals
         self.webrtc.connect('on-negotiation-needed', self.on_negotiation_needed)
@@ -862,27 +840,12 @@ class GStreamerWebRTC:
         # Monitor pipeline stats
         GLib.timeout_add_seconds(5, self.print_stats)
 
-    def ensure_fifo(self):
-        """Ensure FIFO exists without removing it while in use"""
-        if os.path.exists(self.fifo_path):
-            if not stat.S_ISFIFO(os.stat(self.fifo_path).st_mode):
-                raise RuntimeError(f"{self.fifo_path} exists and is not a FIFO")
-            return
-        os.mkfifo(self.fifo_path)
-        logger.info(f"Created FIFO at {self.fifo_path}")
-
     def check_rtp_caps_ready(self):
         """Wait until rtph264pay has negotiated caps with a concrete payload"""
         if self.negotiation_started:
             return False
 
         self.rtp_caps_check_count += 1
-
-        # If rpicam died, try to restart it (without touching FIFO)
-        if self.rpicam_process and self.rpicam_process.poll() is not None:
-            self.rpicam_restart_count += 1
-            logger.warning(f"rpicam-vid exited, restarting (attempt {self.rpicam_restart_count})")
-            self.start_rpicam()
 
         if self.rtp_caps_ready():
             logger.info("RTP caps negotiated (payload=96), triggering negotiation...")
@@ -996,17 +959,6 @@ class GStreamerWebRTC:
         finally:
             if self.pipe:
                 self.pipe.set_state(Gst.State.NULL)
-            if self.reader_stop:
-                self.reader_stop.set()
-            if self.reader_thread and self.reader_thread.is_alive():
-                self.reader_thread.join(timeout=2)
-            if hasattr(self, 'rpicam_process'):
-                self.rpicam_process.terminate()
-                self.rpicam_process.wait()
-            if hasattr(self, 'fifo_path'):
-                import os
-                if os.path.exists(self.fifo_path):
-                    os.remove(self.fifo_path)
             if self.car_controller:
                 self.car_controller.stop()
             if self.pc_control:
@@ -1027,48 +979,15 @@ class GStreamerWebRTC:
             
             # Don't create Cloudflare session yet - wait until we're ready to send offer
             # This prevents session timeout
-            
-            # Ensure FIFO exists before starting rpicam and pipeline
-            self.ensure_fifo()
 
-            # Start rpicam-vid process (returns immediately)
-            self.start_rpicam()
-            
-            # Schedule pipeline creation after rpicam-vid initializes
-            logger.info("Scheduling pipeline creation in 2 seconds...")
-            GLib.timeout_add(2000, self.create_and_start_pipeline)
+            # Create pipeline immediately
+            GLib.idle_add(self.create_and_start_pipeline)
             
         except Exception as e:
             logger.error(f"Initialization failed: {e}")
             self.main_loop.quit()
         
         return False  # Don't repeat idle callback
-    
-    def start_rpicam(self):
-        """Start v4l2src with Rockchip MPP encoder (replaces rpicam-vid)"""
-        import subprocess
-
-        if self.rpicam_process and self.rpicam_process.poll() is not None:
-            return
-
-        # FIFO should already exist
-        self.ensure_fifo()
-
-        stderr_log = open('/tmp/v4l2-encode.log', 'ab')
-        
-        # Use GStreamer to encode v4l2 -> H.264 -> FIFO
-        # This replaces rpicam-vid on Radxa
-        self.rpicam_process = subprocess.Popen([
-            'gst-launch-1.0', '-e',
-            'v4l2src', 'device=/dev/video0', 'io-mode=mmap', '!',
-            f'video/x-raw,format=NV12,width={WIDTH},height={HEIGHT},framerate={FRAMERATE}/1', '!',
-            'mpph264enc', f'bps={BITRATE}', f'bps-max={BITRATE}', f'gop={FRAMERATE}',
-            'rc-mode=cbr', 'profile=baseline', 'header-mode=each-idr', '!',
-            'h264parse', '!',
-            'video/x-h264,stream-format=byte-stream,alignment=nal', '!',
-            'filesink', f'location={self.fifo_path}'
-        ], stdout=subprocess.DEVNULL, stderr=stderr_log)
-        logger.info(f"Started v4l2src+mpph264enc: {WIDTH}x{HEIGHT} @ {FRAMERATE}fps, {BITRATE/1000000}Mbps")
     
     def create_and_start_pipeline(self):
         """Create and start GStreamer pipeline (called after rpicam-vid delay)"""
@@ -1080,9 +999,6 @@ class GStreamerWebRTC:
             self.start_pipeline()
             
             logger.info("Pipeline started successfully!")
-
-            # Start FIFO reader feeding appsrc
-            self.start_fifo_reader()
 
             # Trigger negotiation only after caps are negotiated
             GLib.timeout_add(500, self.check_rtp_caps_ready)
@@ -1096,119 +1012,6 @@ class GStreamerWebRTC:
         
         return False  # Don't repeat
 
-    def start_fifo_reader(self):
-        """Start background thread that reads FIFO and pushes to appsrc"""
-        if not self.appsrc:
-            logger.error("appsrc not available; cannot start FIFO reader")
-            return
-        if self.reader_thread and self.reader_thread.is_alive():
-            return
-
-        self.reader_stop.clear()
-        self.reader_thread = threading.Thread(target=self._fifo_reader_loop, daemon=True)
-        self.reader_thread.start()
-        logger.info("Started FIFO reader thread")
-
-    def _fifo_reader_loop(self):
-        """Read H.264 byte-stream from FIFO, split by start codes, push to appsrc"""
-        buffer = bytearray()
-
-        while not self.reader_stop.is_set():
-            try:
-                with open(self.fifo_path, 'rb', buffering=0) as fifo:
-                    while not self.reader_stop.is_set():
-                        chunk = fifo.read(4096)
-                        if not chunk:
-                            time.sleep(0.005)
-                            continue
-                        buffer.extend(chunk)
-                        self._drain_nals(buffer)
-            except Exception as e:
-                logger.warning(f"FIFO reader error: {e}")
-                time.sleep(0.1)
-
-    def _find_start_code(self, data, offset):
-        """Return (index, length) of next H.264 start code or (-1, 0)"""
-        i3 = data.find(b'\x00\x00\x01', offset)
-        i4 = data.find(b'\x00\x00\x00\x01', offset)
-        if i3 == -1 and i4 == -1:
-            return -1, 0
-        if i3 == -1:
-            return i4, 4
-        if i4 == -1:
-            return i3, 3
-        return (i3, 3) if i3 < i4 else (i4, 4)
-
-    def _drain_nals(self, buffer):
-        """Extract NAL units from buffer and push to appsrc"""
-        while True:
-            start, sc_len = self._find_start_code(buffer, 0)
-            if start == -1:
-                # keep last 3 bytes to detect a start code split across reads
-                if len(buffer) > 3:
-                    del buffer[:-3]
-                return
-            if start > 0:
-                del buffer[:start]
-
-            next_start, _ = self._find_start_code(buffer, sc_len)
-            if next_start == -1:
-                return
-
-            nal = bytes(buffer[:next_start])
-            del buffer[:next_start]
-
-            self._push_nal(nal, sc_len)
-
-    def _push_nal(self, nal, sc_len):
-        """Push a single NAL unit to appsrc with simple drop strategy"""
-        if not self.appsrc or len(nal) <= sc_len:
-            return
-
-        nal_type = nal[sc_len] & 0x1F
-
-        if nal_type == 7:
-            self.cached_sps = nal
-        elif nal_type == 8:
-            self.cached_pps = nal
-
-        # Drop strategy when appsrc is backlogged: skip non-IDR slices until next IDR
-        level_bytes = self.appsrc.get_property('current-level-bytes')
-        if level_bytes > self.drop_high_watermark:
-            self.drop_until_idr = True
-            self.sps_pps_needed = True
-
-        if self.drop_until_idr:
-            if nal_type not in (5, 7, 8):
-                self.drop_count += 1
-                return
-            if nal_type == 5:
-                if self.sps_pps_needed:
-                    self._push_cached_parameter_sets()
-                self.drop_until_idr = False
-                self.sps_pps_needed = False
-
-        # If backlog is still above low watermark, drop non-IDR slices aggressively
-        if level_bytes > self.drop_low_watermark and nal_type in (1, 2, 3, 4):
-            self.drop_count += 1
-            return
-
-        buf = Gst.Buffer.new_allocate(None, len(nal), None)
-        buf.fill(0, nal)
-        ret = self.appsrc.emit('push-buffer', buf)
-        if ret != Gst.FlowReturn.OK:
-            logger.debug(f"appsrc push-buffer returned {ret}")
-
-    def _push_cached_parameter_sets(self):
-        """Push cached SPS/PPS before IDR if available"""
-        if self.cached_sps:
-            buf = Gst.Buffer.new_allocate(None, len(self.cached_sps), None)
-            buf.fill(0, self.cached_sps)
-            self.appsrc.emit('push-buffer', buf)
-        if self.cached_pps:
-            buf = Gst.Buffer.new_allocate(None, len(self.cached_pps), None)
-            buf.fill(0, self.cached_pps)
-            self.appsrc.emit('push-buffer', buf)
     
     def check_control_session(self):
         """Poll signaling server for control session ID"""
