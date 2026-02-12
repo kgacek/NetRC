@@ -46,10 +46,10 @@ UART_DEV = os.getenv('UART_DEV', '/dev/ttyS0')
 UART_BAUD = int(os.getenv('UART_BAUD', '115200'))
 
 # Video configuration
-WIDTH = 1280
-HEIGHT = 720
-FRAMERATE = 25
-BITRATE = 2500000  # 2.5 Mbps for 720p
+WIDTH = 1920
+HEIGHT = 1080
+FRAMERATE = 30
+BITRATE = 6000000  # 6 Mbps for 1080p30
 
 # Low-latency tuning
 QUEUE_MAX_TIME_NS = 20_000_000  # 20 ms
@@ -1060,11 +1060,9 @@ class GStreamerWebRTC:
         # This replaces rpicam-vid on Radxa
         self.rpicam_process = subprocess.Popen([
             'gst-launch-1.0', '-e',
-            'v4l2src', 'device=/dev/video0', '!',
+            'v4l2src', 'device=/dev/video0', 'io-mode=mmap', '!',
             f'video/x-raw,format=NV12,width={WIDTH},height={HEIGHT},framerate={FRAMERATE}/1', '!',
-            'videoconvert', '!',
-            'video/x-raw,format=I420', '!',
-            'mpph264enc', f'bps={BITRATE}', f'bps-max={BITRATE}', f'gop={FRAMERATE}', 
+            'mpph264enc', f'bps={BITRATE}', f'bps-max={BITRATE}', f'gop={FRAMERATE}',
             'rc-mode=cbr', 'profile=baseline', 'header-mode=each-idr', '!',
             'h264parse', '!',
             'video/x-h264,stream-format=byte-stream,alignment=nal', '!',
