@@ -458,8 +458,20 @@ class GStreamerWebRTC:
         self.pipe.add(caps_rtp)
         self.pipe.add(self.webrtc)
 
-        if not Gst.Element.link_many(v4l2src, caps_raw, enc, h264parse, caps_h264, pay, queue, caps_rtp):
-            raise RuntimeError("Failed to link encoder pipeline")
+        if not v4l2src.link(caps_raw):
+            raise RuntimeError("Failed to link v4l2src -> caps_raw")
+        if not caps_raw.link(enc):
+            raise RuntimeError("Failed to link caps_raw -> mpph264enc")
+        if not enc.link(h264parse):
+            raise RuntimeError("Failed to link mpph264enc -> h264parse")
+        if not h264parse.link(caps_h264):
+            raise RuntimeError("Failed to link h264parse -> caps_h264")
+        if not caps_h264.link(pay):
+            raise RuntimeError("Failed to link caps_h264 -> rtph264pay")
+        if not pay.link(queue):
+            raise RuntimeError("Failed to link rtph264pay -> queue")
+        if not queue.link(caps_rtp):
+            raise RuntimeError("Failed to link queue -> caps_rtp")
 
         # Link RTP to webrtcbin request pad
         rtp_src_pad = caps_rtp.get_static_pad("src")
