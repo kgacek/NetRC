@@ -390,6 +390,7 @@ class GStreamerWebRTC:
     def create_pipeline(self):
         """Create GStreamer pipeline: v4l2src -> mpph264enc -> webrtcbin"""
         pipeline_str = f"""
+        webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.cloudflare.com:3478
         v4l2src device=/dev/video0 io-mode=mmap !
         video/x-raw,format=NV12,width={WIDTH},height={HEIGHT},framerate={FRAMERATE}/1 !
         mpph264enc bps={BITRATE} bps-max={BITRATE} gop={FRAMERATE} rc-mode=cbr profile=baseline header-mode=each-idr !
@@ -399,7 +400,6 @@ class GStreamerWebRTC:
         queue leaky=downstream max-size-time={QUEUE_MAX_TIME_NS} max-size-buffers=0 max-size-bytes=0 !
         application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000 !
         sendrecv.
-        webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.cloudflare.com:3478
         """
 
         logger.info("Creating GStreamer pipeline (v4l2src -> mpph264enc -> webrtcbin)")
