@@ -37,8 +37,8 @@ UART_DEV = os.getenv('UART_DEV', '/dev/ttyS0')
 UART_BAUD = int(os.getenv('UART_BAUD', '115200'))
 
 # Video configuration
-WIDTH = 1920
-HEIGHT = 1080
+WIDTH = 1280
+HEIGHT = 720
 FRAMERATE = 25
 BITRATE = 5000000  # 5 Mbps for 1080p
 
