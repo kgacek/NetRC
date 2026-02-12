@@ -37,14 +37,14 @@ UART_DEV = os.getenv('UART_DEV', '/dev/ttyS0')
 UART_BAUD = int(os.getenv('UART_BAUD', '115200'))
 
 # Video configuration
-WIDTH = 1280
-HEIGHT = 720
+WIDTH = 1920
+HEIGHT = 1080
 FRAMERATE = 25
-BITRATE = 2500000  # 2.5 Mbps for 720p
+BITRATE = 5000000  # 5 Mbps for 1080p
 
 # Low-latency tuning
 QUEUE_MAX_TIME_NS = 20_000_000  # 20 ms
-QUEUE_MAX_BUFFERS = 0
+QUEUE_MAX_BUFFERS = 1
 APPsrc_HIGH_WATERMARK = 128 * 1024  # bytes
 APPsrc_LOW_WATERMARK = 64 * 1024    # bytes
 
@@ -332,7 +332,6 @@ class GStreamerWebRTC:
         h264parse !
         video/x-h264,stream-format=avc,alignment=au,profile=baseline !
         rtph264pay pt=96 mtu=1200 config-interval=1 aggregate-mode=zero-latency !
-        queue leaky=downstream max-size-time={QUEUE_MAX_TIME_NS} max-size-bytes=0 max-size-buffers=0 !
         application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000 !
         webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.cloudflare.com:3478
         """
@@ -349,6 +348,11 @@ class GStreamerWebRTC:
             self.appsrc.set_property('max-bytes', self.appsrc_max_bytes)
             self.appsrc.set_property('min-latency', 0)
             self.appsrc.set_property('max-latency', 0)
+        if self.webrtc:
+            try:
+                self.webrtc.set_property('latency', 50)
+            except Exception:
+                pass
         
         # Connect signals
         self.webrtc.connect('on-negotiation-needed', self.on_negotiation_needed)
