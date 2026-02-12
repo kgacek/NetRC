@@ -476,6 +476,12 @@ class GStreamerWebRTC:
         # Link RTP to webrtcbin request pad
         rtp_src_pad = caps_rtp.get_static_pad("src")
         webrtc_sink_pad = self.webrtc.get_request_pad("sink_%u")
+        if not webrtc_sink_pad:
+            templ = self.webrtc.get_pad_template("sink_%u")
+            if templ:
+                webrtc_sink_pad = self.webrtc.request_pad(templ, None, None)
+        if not webrtc_sink_pad:
+            webrtc_sink_pad = self.webrtc.get_request_pad("sink_0")
         if not rtp_src_pad or not webrtc_sink_pad:
             raise RuntimeError("Failed to get pads for webrtcbin link")
         if rtp_src_pad.link(webrtc_sink_pad) != Gst.PadLinkReturn.OK:
